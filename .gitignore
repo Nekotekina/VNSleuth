@@ -1,0 +1,5 @@
+cache
+cache/*
+prompts/*
+.vscode/*
+vnsleuth

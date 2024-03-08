@@ -1,0 +1,13 @@
+Language: Cpp
+IndentWidth: 4
+PointerAlignment: Left
+BreakBeforeBraces: Custom
+BraceWrapping: { AfterFunction: true, AfterControlStatement: false }
+IndentCaseLabels: false
+ReflowComments: false
+ColumnLimit: 150
+AllowShortBlocksOnASingleLine: true
+AllowShortIfStatementsOnASingleLine: false
+AllowShortLoopsOnASingleLine: false
+UseTab: Always
+TabWidth: 4
