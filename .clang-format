@@ -9,5 +9,6 @@ ColumnLimit: 150
 AllowShortBlocksOnASingleLine: true
 AllowShortIfStatementsOnASingleLine: false
 AllowShortLoopsOnASingleLine: false
+AlwaysBreakTemplateDeclarations: true
 UseTab: Always
 TabWidth: 4

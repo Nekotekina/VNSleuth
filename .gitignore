@@ -1,5 +1,4 @@
-cache
-cache/*
-prompts/*
+config/*
 .vscode/*
 vnsleuth
+*.o
