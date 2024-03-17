@@ -2,3 +2,4 @@ config/*
 .vscode/*
 vnsleuth
 *.o
+tools/xclipmonitor/xclipmonitor

@@ -14,6 +14,7 @@
 #include <vector>
 
 #ifndef _WIN32
+#include <fcntl.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -174,7 +175,7 @@ int main(int argc, char* argv[])
 	int ipipe_fd[2]{}; // [1] Writing to llama.cpp stdin
 	int epipe_fd[2]{}; // [0] Reading from llama.cpp stderr
 	if (g_mode == op_mode::rt_llama || g_mode == op_mode::make_cache) {
-		if (pipe(opipe_fd) != 0 || pipe(ipipe_fd) != 0 || pipe(epipe_fd) != 0) {
+		if (pipe(opipe_fd) != 0 || pipe(ipipe_fd) != 0 || pipe2(epipe_fd, O_NONBLOCK) != 0) {
 			perror("Failed to create pipes");
 			return 2;
 		}
@@ -219,9 +220,9 @@ int main(int argc, char* argv[])
 					continue;
 				if (entry.path().filename() == "__vnsleuth_names.txt")
 					continue;
-				// Check file size (must be within 10 GiB)
+				// Check file size (must be less than 4 GiB)
 				const auto size = entry.file_size();
-				if (size > 10 && size <= 10ull * 1024 * 1024 * 1024)
+				if (size > 10 && size < 4ull * 1024 * 1024 * 1024)
 					file_list.emplace_back(entry.path(), size);
 			}
 		}
