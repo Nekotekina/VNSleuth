@@ -76,7 +76,11 @@ std::string print_line(size_t id, int fd = -1, std::string* line = nullptr, std:
 	bool ret = false;
 
 	std::string speaker;
-	if (!result.empty()) {
+	if (result.starts_with("選択肢#")) {
+		// Insert translated choice selection prefix
+		speaker += " Choice ";
+		speaker += result.substr("選択肢#"sv.size());
+	} else if (!result.empty()) {
 		// Find registered speaker translation
 		const auto& found = g_speakers.at(result);
 		if (found.empty()) {
@@ -609,6 +613,13 @@ int main(int argc, char* argv[])
 			// Auto-continuation of repeated lines (compensate for repetition suppression)
 			if (next_id > last_id && g_text[next_id].second == g_text[prev_id].second) {
 				last_id++;
+				continue;
+			}
+
+			// List choices that are supposed to appear on the screen
+			if (next_id > last_id && g_text[next_id].first.starts_with("選択肢#")) {
+				last_id++;
+				continue;
 			}
 		}
 	}

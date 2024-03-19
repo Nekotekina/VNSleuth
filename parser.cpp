@@ -1,6 +1,7 @@
 #include "iconv.hpp"
 #include "main.hpp"
 #include <bit>
+#include <functional>
 #include <iostream>
 #include <regex>
 #include <string>
@@ -10,6 +11,8 @@
 static_assert("か"sv == "\xE3\x81\x8B"sv, "This source file shall be compiled as UTF-8 text");
 
 extern const std::size_t example_lines;
+
+static /*thread_local*/ std::function<std::ostream&()> err = [] { return std::ref(std::cerr); };
 
 // Read little-endian number from string
 template <typename T, typename Off>
@@ -35,7 +38,7 @@ bool read_sjis(std::string& dst, const std::string& data, size_t pos)
 	return true;
 }
 
-void add_line(std::string name, std::string text, std::istream& cache)
+void add_line(int choice, std::string name, std::string text, std::istream& cache)
 {
 	// Apply some filtering: remove \r and replace \n with \t
 	while (auto pos = text.find_first_of("\r") + 1)
@@ -46,7 +49,13 @@ void add_line(std::string name, std::string text, std::istream& cache)
 	if (!name.empty()) {
 		// Add (special) character ":" after name
 		REPLACE(name, ":", "：");
+		REPLACE(name, "#", "＃");
 		name += ":";
+	}
+
+	if (choice && name.empty()) {
+		// Add choice "name" in special format
+		name = "選択肢#" + std::to_string(choice) + ":";
 	}
 
 	auto [name_it, ok1] = g_loc.try_emplace(std::move(name), 0);
@@ -56,7 +65,7 @@ void add_line(std::string name, std::string text, std::istream& cache)
 		text_it->second = 0; // Mark if not unique
 
 	g_text.emplace_back(name_it->first, text_it->first);
-	if (name_it->first.size())
+	if (name_it->first.size() && !choice)
 		g_speakers.emplace(name_it->first, std::string());
 	if (cache) {
 		// Extract cached translation
@@ -101,6 +110,49 @@ void add_line(std::string name, std::string text, std::istream& cache)
 	}
 }
 
+// Add furigana
+void add_ruby(std::string type_as, std::string read_as)
+{
+	// Don't register accent dots as furigana
+	static constexpr std::string_view rep_dot = "・・・・・・・・・・・・・・・・・・・・"
+												"・・・・・・・・・・・・・・・・・・・・"
+												"・・・・・・・・・・・・・・・・・・・・"
+												"・・・・・・・・・・・・・・・・・・・・"
+												"・・・・・・・・・・・・・・・・・・・・"
+												"・・・・・・・・・・・・・・・・・・・・"
+												"・・・・・・・・・・・・・・・・・・・・"
+												"・・・・・・・・・・・・・・・・・・・・"
+												"・・・・・・・・・・・・・・・・・・・・"
+												"・・・・・・・・・・・・・・・・・・・・";
+	if (rep_dot.starts_with(read_as))
+		return;
+	g_furigana.emplace(std::move(type_as), std::move(read_as));
+}
+
+// Parse and register furigana (Buriko/Ethornell engine)
+std::string parse_ruby_eth(const std::string& text)
+{
+	static const std::regex rrgx("<R(.*?)>(.*?)</R>");
+	auto words_begin = std::sregex_iterator(text.begin(), text.end(), rrgx);
+	auto words_end = std::sregex_iterator();
+	std::size_t shift = 0;
+	std::string result = text;
+
+	for (std::sregex_iterator i = words_begin; i != words_end; i++) {
+		auto read_as = i->str(1);
+		auto type_as = i->str(2);
+
+		result.replace(i->position() - shift, i->length(), type_as);
+		shift += i->length() - type_as.length();
+		add_ruby(std::move(type_as), std::move(read_as));
+	}
+
+	if (result.find_first_of("<") + 1)
+		err() << "Possibly unknown tag found" << std::endl;
+
+	return result;
+}
+
 // Return number of lines parsed
 std::size_t parse(const std::string& data, std::istream& cache)
 {
@@ -113,6 +165,16 @@ std::size_t parse(const std::string& data, std::istream& cache)
 			return false;
 		off = (add_off += 0x1c); // Offset added to PUSH opcode string location, and first OP offset
 		std::vector<std::string> stack;
+		err = [&] {
+			std::cerr << "Format: Buriko/ETH" << std::endl;
+			std::cerr << "Offset: " << off << std::endl;
+			std::cerr << "Opcode: " << op << std::endl;
+			std::cerr << "Stack: " << stack.size() << std::endl;
+			for (auto& s : stack)
+				std::cerr << s << std::endl;
+			std::cerr << "Error: ";
+			return std::ref(std::cerr);
+		};
 		while (read_le(op, data, off)) {
 			switch (op) {
 			case 0:
@@ -153,6 +215,18 @@ std::size_t parse(const std::string& data, std::istream& cache)
 				}
 				continue;
 			}
+			if (op == 28 && !stack.empty()) {
+				// CALL
+				if (stack.back() == "_Selection") {
+					if (stack.size() < 3)
+						err() << "_Selection: too little stack" << std::endl;
+
+					// Add choices
+					for (unsigned i = 1; i < stack.size(); i++) {
+						add_line(i, "", parse_ruby_eth(stack[i - 1]), cache);
+					}
+				}
+			}
 			if (op == 0x140 && !stack.empty()) {
 				// PRINT
 				std::string name, text, textfix;
@@ -162,34 +236,12 @@ std::size_t parse(const std::string& data, std::istream& cache)
 				}
 
 				if (stack.size() > 2)
-					std::cerr << "PRINT: too big stack (parse error)" << std::endl;
+					err() << "PRINT: too big stack (parse error)" << std::endl;
 
-				// Parse and register furigana
-				static const std::regex rrgx("<R(.*?)>(.*?)</R>");
-				auto words_begin = std::sregex_iterator(text.begin(), text.end(), rrgx);
-				auto words_end = std::sregex_iterator();
-				size_t shift = 0;
-				textfix = text;
+				textfix = parse_ruby_eth(text);
 
-				for (std::sregex_iterator i = words_begin; i != words_end; i++) {
-					auto read_as = i->str(1);
-					auto type_as = i->str(2);
-
-					textfix.replace(i->position() - shift, i->length(), type_as);
-					shift += i->length() - type_as.length();
-
-					// Don't register accent dots as furigana
-					static constexpr auto rep_dot =
-						"・・・・・・・・・・・・・・・・・・・・・・・・・・・・・・・・・・・・・・・・・・・・・・・・・・・・・・・・・・・・・・・・・・・・"sv;
-					if (rep_dot.starts_with(read_as))
-						continue;
-					g_furigana.emplace(std::move(type_as), std::move(read_as));
-				}
-
-				if (textfix.find_first_of("<") + 1)
-					std::cerr << "Unknown tag: " << textfix << std::endl;
-
-				add_line(std::move(name), std::move(textfix), cache);
+				// Add normal line
+				add_line(0, std::move(name), std::move(textfix), cache);
 				result++;
 			}
 
