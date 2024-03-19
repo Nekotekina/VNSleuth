@@ -57,11 +57,16 @@ std::string print_line(size_t id, int fd = -1, std::string* line = nullptr, std:
 	std::string out;
 	out += g_text[id].second;
 
+	REPLACE(out, "〜", "～"); // Use one more typical for SJIS-WIN
 	REPLACE(out, "……", "…");
 	REPLACE(out, "──", "─");
 	REPLACE(out, "――", "―");
+	REPLACE(out, "ーーー", "ーー"); // Reduce repetitions
+	REPLACE(out, "ーー", "～");		// Replace "too long" sound with ～
 	REPLACE(out, "～～", "～");
-	REPLACE(out, "「…", "「");
+	REPLACE(out, "「…", "「"); // Sentences starting with … might get translated as empty "..."
+	REPLACE(out, "（…", "（");
+	REPLACE(out, "『…", "『");
 	while (auto pos = out.find_first_of("\r\b") + 1)
 		out.erase(pos - 1, 1);
 	while (auto pos = out.find_first_of("\n\t") + 1)
