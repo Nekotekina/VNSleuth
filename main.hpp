@@ -14,6 +14,15 @@ using namespace std::literals;
 
 static_assert("か"sv == "\xE3\x81\x8B"sv, "This source file shall be compiled as UTF-8 text");
 
+// Operation mode
+inline enum class op_mode {
+	print_only = 0, // Legacy mode (passthrough)
+	rt_cached,
+	rt_llama,
+	print_info,
+	make_cache,
+} g_mode{};
+
 #define REPLACE(s, x, y)                                                                                                                             \
 	while (auto pos = s.find(x##sv, 0) + 1)                                                                                                          \
 		s.replace(pos - 1, x##sv.size(), y##sv);

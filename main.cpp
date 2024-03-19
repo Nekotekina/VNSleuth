@@ -22,18 +22,10 @@
 
 static_assert("か"sv == "\xE3\x81\x8B"sv, "This source file shall be compiled as UTF-8 text");
 
-// Operation mode
-enum class op_mode {
-	print_only = 0,
-	rt_cached,
-	rt_llama,
-	print_info,
-	make_cache,
-} g_mode{};
-
+// Guiding prefix for original lines of text
 std::string iprefix = "JP: ";
 
-// En: suffix doesn't contain a space, for an interesting reason.
+// En: prefix doesn't contain a space, for an interesting reason.
 // For Chinese models it may turn into an explicit space token.
 // In English text such token usually doesn't appear.
 // However, it may appear in Chinese texts as a delimiter.
@@ -126,6 +118,8 @@ namespace fs = std::filesystem;
 
 void update_names(const std::string& path)
 {
+	if (path.empty())
+		return;
 	const auto path_tmp = path + ".tmp";
 	std::ofstream names(path_tmp, std::ios_base::trunc);
 	if (names.is_open()) {
@@ -204,11 +198,14 @@ int main(int argc, char* argv[])
 		fs::path path = fs::absolute(fs::path(dir_name)).lexically_normal();
 		while (true) {
 			fs::path parent = path.parent_path();
-			if (parent == path.root_path())
+			prompt_path = parent / "__vnsleuth_prompt.txt";
+			names_path = parent / "__vnsleuth_names.txt";
+			if (parent == path.root_path()) {
+				prompt_path.clear();
+				names_path.clear();
 				break;
-			if (fs::is_regular_file(parent / "__vnsleuth_prompt.txt")) {
-				prompt_path = parent / "__vnsleuth_prompt.txt";
-				names_path = parent / "__vnsleuth_names.txt";
+			}
+			if (fs::is_regular_file(prompt_path) || fs::is_regular_file(names_path)) {
 				break;
 			}
 			path = std::move(parent);
@@ -218,10 +215,8 @@ int main(int argc, char* argv[])
 			is_incomplete = true;
 	} else {
 		fs::path path = fs::absolute(fs::path(dir_name)).lexically_normal();
-		if (fs::is_regular_file(path / "__vnsleuth_prompt.txt")) {
-			prompt_path = path / "__vnsleuth_prompt.txt";
-			names_path = path / "__vnsleuth_names.txt";
-		}
+		prompt_path = path / "__vnsleuth_prompt.txt";
+		names_path = path / "__vnsleuth_names.txt";
 		for (const auto& entry : fs::recursive_directory_iterator(path, fs::directory_options::follow_directory_symlink)) {
 			if (entry.is_regular_file()) {
 				// Skip special files
@@ -237,7 +232,7 @@ int main(int argc, char* argv[])
 		}
 	}
 
-	if (prompt_path.empty()) {
+	if (prompt_path.empty() || !fs::is_regular_file(prompt_path)) {
 		std::cerr << "Translation prompt not found: " << prompt_path << std::endl;
 		if (g_mode == op_mode::make_cache || g_mode == op_mode::rt_llama) {
 			std::cerr << "Translation prompt is required." << std::endl;
