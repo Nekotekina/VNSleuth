@@ -52,6 +52,17 @@ void add_line(int choice, std::string name, std::string text, std::istream& cach
 		// Add (special) character ":" after name
 		REPLACE(name, ":", "：");
 		REPLACE(name, "#", "＃");
+		REPLACE(name, "　", " "); // Temporarily use ASCII spaces; trimming
+		while (name.ends_with(" "))
+			name.erase(name.end() - 1);
+		while (name.starts_with(" "))
+			name.erase(0, 1);
+		REPLACE(name, " ", "　"); // Change all spaces to full-width
+		if (name.empty()) {
+			// Use placeholder for empty names
+			name = "？？？";
+		}
+
 		name += ":";
 	}
 
