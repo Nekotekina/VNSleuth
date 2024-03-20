@@ -1,5 +1,5 @@
-#include "iconv.hpp"
 #include "main.hpp"
+#include "tools/iconv.hpp"
 #include <bit>
 #include <functional>
 #include <iostream>
@@ -9,6 +9,8 @@
 #include <vector>
 
 static_assert("か"sv == "\xE3\x81\x8B"sv, "This source file shall be compiled as UTF-8 text");
+
+extern std::string iprefix;
 
 extern const std::size_t example_lines;
 
@@ -74,7 +76,7 @@ void add_line(int choice, std::string name, std::string text, std::istream& cach
 			std::string temp;
 			while (std::getline(cache, temp)) {
 				// Skip prompt (or garbage?)
-				if (temp.starts_with("JP:")) {
+				if (temp.starts_with(iprefix)) {
 					break;
 				}
 			}
@@ -86,7 +88,7 @@ void add_line(int choice, std::string name, std::string text, std::istream& cach
 				}
 			}
 
-			if (!temp.starts_with("JP:")) {
+			if (!temp.starts_with(iprefix)) {
 				return false;
 			}
 			src = std::move(temp);

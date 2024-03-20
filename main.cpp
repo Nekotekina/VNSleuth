@@ -1,4 +1,5 @@
 #include "main.hpp"
+#include "tools/tiny_sha1.hpp"
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
@@ -7,7 +8,6 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
-#include <sha.h>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -272,10 +272,15 @@ int main(int argc, char* argv[])
 
 			{
 				// Generate SHA1 hash, and return cache path to 123..5fbd.txt
-				char buf[SHA1_DIGEST_STRING_LENGTH]{};
+				char buf[42]{};
+				sha1::SHA1 s;
+				s.processBytes(line.data(), line.size());
+				std::uint32_t digest[5];
+				s.getDigest(digest);
+				std::snprintf(buf, 41, "%08x%08x%08x%08x%08x", digest[0], digest[1], digest[2], digest[3], digest[4]);
 				cache_path = fs::path(file_list[i].first).parent_path();
 				cache_path += "/";
-				cache_path += SHA1Data(reinterpret_cast<const uint8_t*>(line.data()), line.size(), buf);
+				cache_path += buf;
 				cache_path += ".txt";
 			}
 

@@ -1,16 +1,16 @@
 CXX = g++
 CXXFLAGS = -std=c++20 -Wall -Wextra -O2
-LIBS = -lmd
+LIBS =
 
 TARGET = vnsleuth
 SOURCES = main.o parser.o
 
 all: $(TARGET)
 
-main.o: main.cpp main.hpp
+main.o: main.cpp main.hpp tools/tiny_sha1.hpp
 	$(CXX) $(CXXFLAGS) -c main.cpp
 
-parser.o: parser.cpp main.hpp iconv.hpp
+parser.o: parser.cpp main.hpp tools/iconv.hpp
 	$(CXX) $(CXXFLAGS) -c parser.cpp
 
 $(TARGET): $(SOURCES)
