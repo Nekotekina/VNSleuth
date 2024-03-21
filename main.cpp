@@ -247,6 +247,11 @@ int main(int argc, char* argv[])
 			while (std::getline(names, line)) {
 				if (line.ends_with("\r"))
 					line.erase(line.end() - 1);
+				if (!line.ends_with(":")) {
+					// Translated name is either empty or ends with another ':'
+					std::cerr << "Failed to parse translated name string: " << line << std::endl;
+					continue;
+				}
 				if (const auto pos = line.find_first_of(":") + 1)
 					g_speakers.emplace(line.substr(0, pos), line.substr(pos));
 			}
