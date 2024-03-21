@@ -163,6 +163,9 @@ std::string parse_ruby_eth(const std::string& text)
 	if (result.find_first_of("<") + 1)
 		err() << "Possibly unknown tag found" << std::endl;
 
+	// Remove newlines completely
+	while (auto pos = result.find_first_of("\n\r") + 1)
+		result.erase(pos - 1, 1);
 	return result;
 }
 
