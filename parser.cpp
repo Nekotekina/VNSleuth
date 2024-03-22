@@ -40,16 +40,37 @@ bool read_sjis(std::string& dst, const std::string& data, size_t pos)
 	return true;
 }
 
+bool is_text_bytes(const std::string& data)
+{
+	for (unsigned char c : data) {
+		// Find unexpected control characters
+		if (c < 32 && c != '\n' && c != '\r' && c != '\t') {
+			return false;
+		}
+		if (c == 0x7f) {
+			return false;
+		}
+	}
+
+	return true;
+}
+
 void add_line(int choice, std::string name, std::string text, std::istream& cache)
 {
+	if (!is_text_bytes(name))
+		err() << "Bad line (name): " << name << std::endl;
+	if (!is_text_bytes(text))
+		err() << "Bad line (text): " << text << std::endl;
+
 	// Apply some filtering: remove \r and replace \n with \t
-	while (auto pos = text.find_first_of("\r") + 1)
-		text.erase(pos - 1, 1);
+	REPLACE(text, "\r", "");
 	while (auto pos = text.find_first_of("\n") + 1)
 		text[pos - 1] = '\t';
 
 	if (!name.empty()) {
 		// Add (special) character ":" after name
+		REPLACE(name, "\r", "");
+		REPLACE(name, "\n", " ");
 		REPLACE(name, ":", "：");
 		REPLACE(name, "#", "＃");
 		REPLACE(name, "　", " "); // Temporarily use ASCII spaces; trimming
@@ -175,13 +196,7 @@ std::size_t parse(const std::string& data, std::istream& cache)
 	std::size_t result = 0;
 
 	// Detect script format then parse appropriately
-	bool is_text = true;
-	for (unsigned char c : data) {
-		if (c < 32 && c != '\n' && c != '\r') {
-			is_text = false;
-			break;
-		}
-	}
+	const bool is_text = is_text_bytes(data);
 
 	if (!is_text && data.starts_with("BurikoCompiledScriptVer1.00\0"sv)) {
 		std::uint32_t add_off{}, off{}, op{};

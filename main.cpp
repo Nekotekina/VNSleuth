@@ -13,11 +13,16 @@
 #include <utility>
 #include <vector>
 
-#ifndef _WIN32
 #include <fcntl.h>
 #include <sys/types.h>
+#ifndef _WIN32
 #include <sys/wait.h>
 #include <unistd.h>
+#else
+#define NOMINMAX
+#define WIN32_LEAN_AND_MEAN
+#include <io.h>
+#include <windows.h>
 #endif
 
 static_assert("か"sv == "\xE3\x81\x8B"sv, "This source file shall be compiled as UTF-8 text");
@@ -48,7 +53,7 @@ std::string print_line(size_t id, int fd = -1, std::string* line = nullptr, std:
 	// Reduce token count and also fix potential issues with borked translations
 	std::string out;
 	out += g_text[id].second;
-
+	REPLACE(out, "\t", "　");
 	REPLACE(out, "〜", "～"); // Use one more typical for SJIS-WIN
 	REPLACE(out, "……", "…");
 	REPLACE(out, "──", "─");
@@ -59,10 +64,26 @@ std::string print_line(size_t id, int fd = -1, std::string* line = nullptr, std:
 	REPLACE(out, "「…", "「"); // Sentences starting with … might get translated as empty "..."
 	REPLACE(out, "（…", "（");
 	REPLACE(out, "『…", "『");
-	while (auto pos = out.find_first_of("\r\b") + 1)
-		out.erase(pos - 1, 1);
-	while (auto pos = out.find_first_of("\n\t") + 1)
-		out[pos - 1] = ' ';
+	if (out.starts_with("…") && out != "…")
+		out.erase(0, "…"sv.size());
+	REPLACE(out, "ぁぁ", "ぁ");
+	REPLACE(out, "ぃぃ", "ぃ");
+	REPLACE(out, "ぅぅ", "ぅ");
+	REPLACE(out, "ぇぇ", "ぇ");
+	REPLACE(out, "ぉぉ", "ぉ");
+	REPLACE(out, "ゃゃ", "ゃ");
+	REPLACE(out, "ゅゅ", "ゅ");
+	REPLACE(out, "ょょ", "ょ");
+	REPLACE(out, "っっ", "っ");
+	REPLACE(out, "ァァ", "ァ");
+	REPLACE(out, "ィィ", "ィ");
+	REPLACE(out, "ゥゥ", "ゥ");
+	REPLACE(out, "ェェ", "ェ");
+	REPLACE(out, "ォォ", "ォ");
+	REPLACE(out, "ャャ", "ャ");
+	REPLACE(out, "ュュ", "ュ");
+	REPLACE(out, "ョョ", "ョ");
+	REPLACE(out, "ッッ", "ッ");
 
 	auto result = std::string(g_text[id].first);
 	bool ret = false;
