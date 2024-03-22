@@ -36,7 +36,7 @@ inline std::unordered_map<std::string, size_t> g_loc;
 // Translation cache (corresponds to g_text)
 inline std::vector<std::string> g_cache{1};
 
-// Furigana database (word -> reading)
+// Furigana database (word ; reading)
 inline std::set<std::pair<std::string, std::string>> g_furigana;
 
 // Speaker database (name -> translation)

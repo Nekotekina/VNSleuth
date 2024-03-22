@@ -30,4 +30,4 @@ I made VNSleuth for myself out of curiosity for new tech and also laziness. Desp
 2. Run `xclipmonitor | vnsleuth "./Scripts/"` and make sure there are no warnings. Now you can run VN with Textractor (use the extension to send hooked text to the clipboard) or some other tool which can copy text to the clipboard automatically. Some hooks may work incorrectly, you may need to add appropriate custom hook if necessary.
 
 ## Disclaimer
-Don't share translation cache as this is a copyright infridgement. Generate your own translation under Fair Use terms.
+Don't share translation cache as it contains original text and thus could be a copyright infringement. Generate your own translations under Fair Use terms.

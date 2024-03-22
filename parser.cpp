@@ -24,7 +24,7 @@ bool read_le(T& dst, const std::string& data, Off&& pos)
 	if (pos + sizeof(T) > data.size())
 		return false;
 	std::memcpy(&dst, data.data() + pos, sizeof(T));
-	if constexpr (!std::is_const_v<Off>)
+	if constexpr (!std::is_const_v<std::remove_reference_t<Off>>)
 		pos += sizeof(T); // Optionally increment position
 	return true;
 }
@@ -175,7 +175,15 @@ std::size_t parse(const std::string& data, std::istream& cache)
 	std::size_t result = 0;
 
 	// Detect script format then parse appropriately
-	if (data.starts_with("BurikoCompiledScriptVer1.00\0"sv)) {
+	bool is_text = true;
+	for (unsigned char c : data) {
+		if (c < 32 && c != '\n' && c != '\r') {
+			is_text = false;
+			break;
+		}
+	}
+
+	if (!is_text && data.starts_with("BurikoCompiledScriptVer1.00\0"sv)) {
 		std::uint32_t add_off{}, off{}, op{};
 		if (!read_le(add_off, data, 0x1c))
 			return false;
