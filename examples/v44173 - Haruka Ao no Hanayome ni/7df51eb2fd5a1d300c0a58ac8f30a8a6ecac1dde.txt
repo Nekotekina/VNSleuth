@@ -1,0 +1,57 @@
+SRC:遥か碧の花嫁に/Scripts/00com_01
+This is an accurate translation of a Japanese novel (follows "JP:") to English (follows "En:").
+Speaker's name always precedes the direct speech.
+Setting: modern day Earth, fantasy.
+Genre: slice of life, comedy, romance, fantasy, mystery, erotic novel.
+Dictionary:
+アタランシア (Atalancia) - main place of action, deep underwater city unknown to normal people. Its denizens have animal-like ears and tails (kemonomimi).
+源 遥生 (Minamoto Haruki), or ハル (Haru) - male protagonist; visitor of Atalancia.
+源 みなも (Minamoto Minamo) - younger sister of Haruki; visitor of Atalancia; blunt and cheerful.
+佐波口 なつみ (Sawaguchi Natsumi) - childhood friend of Haruki; visitor of Atalancia; carefree and cheerful.
+ロザニア・カーニハン (Rosania Carnihan) - royal maid of Atalancia; serious and eccentric.
+ローザ (Rosa) - Rosania's nickname.
+イリオネーラ・ナギ・アタランシア (Irionela Nagi Atalancia) - first princess of Atalancia; young and refined.
+リオ (Rio) - Irionela (shortened).
+リィル・ナギ・アタランシア (Lill Nagi Atalancia), or just Lill - second princess of Atalancia, younger sister of Rio; shy and timid.
+<START>
+JP: ？？？:「猫か…」\
+En: ???: "Ah, so it's a cat..."\
+JP: この物語はフィクションです。\
+En: This story is a work of fiction.\
+JP: ―沈む。
+En: -- Descending...
+JP: 荒れていた海面とは打って変わり、海中は不思議と穏やかだった。
+En: The chaotic surface of the sea was a stark contrast to the strangely calm waters below.
+JP: 耳元で弾ける泡の音には、心地よさすら感じた。
+En: The gentle sound of bubbles popping near my ears brought a sense of comfort.
+JP: ―沈む。
+En: -- Descending...
+JP: ？？？:「ハルーっ！」
+En: ???: "Haru!"
+JP: ？？？:「にーちゃーんっ！！」
+En: ???: "Nii-chan!!"
+JP: 俺を呼ぶ声が、微かに耳に届いたような気がした。
+En: It felt like the voice calling my name was faintly reaching my ears.
+JP: もがくことも、指ひとつ動かすこともできないまま。
+En: Paralyzed, unable to even move a finger.
+JP: 意識は、深い水底へと吸い込まれていく。
+En: My consciousness was being drawn deeper into the watery depths.
+JP: 冷たくなるはずの身体は、不思議な温かさに包まれる。
+En: Despite the chill, my body was enveloped in an inexplicable warmth.
+JP: ああ、この感覚が、死ぬってことなのかな…？
+En: Ah, is this what it feels like to die...?
+JP: ごめんな。みなも。なつみ。
+En: Sorry, Minamo. Natsumi.
+JP: 俺、今度こそ死んじゃうみたいだ。
+En: I think this time I'm really going to die.
+JP: …
+En: ...
+JP: …
+En: ...
+JP: 垣間見えたのは、物心ついて間もない幼少の記憶。
+En: What I glimpsed was the memory of a young, innocent childhood.
+JP: 息のできない冷たい水の中、誰かの優しい腕に抱かれた。
+En: In the freezing water, I was cradled in someone's gentle arms.
+JP: 夢か現実か―淡い境目の走馬灯。
+En: Was it a dream or reality? A fleeting carousel at the hazy boundary.
+JP: 

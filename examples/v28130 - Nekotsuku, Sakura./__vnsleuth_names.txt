@@ -1,0 +1,38 @@
+おばさん:
+おばちゃん:
+のっぺらぼう:Flatface:
+みんな:Everyone:
+アキ:Aki:
+ツキ:Tsuki:
+ブティック店員:
+一同:
+化学教師:
+口裂け女:Screaming Woman:
+女子生徒Ａ:Female Student A:
+女子生徒Ｂ:Female Student B:
+女子生徒Ｃ:Female Student C:
+女子生徒Ｄ:Female Student D:
+女子生徒Ｅ:Female Student E:
+女子生徒Ｆ:Female Student F:
+宗真:Souma:
+宗真＆恋花:Souma&Renka:
+宗真＆文乃:Souma&Ayano:
+宗真＆文乃＆恋花＆ツキ:Souma&Ayano&Renka&Tsuki:
+宗真＆文乃＆恋花＆ツキ＆アキ:Souma&Ayano&Renka&Tsuki&Aki:
+弥生:Yayoi:
+律:Ritsu:
+恋花:Renka:
+恋花＆ツキ:Renka&Tsuki:
+恋花＆弥生:Renka&Yayoi:
+担任の先生:
+文乃:Ayano:
+文乃＆アキ:Ayano&Aki:
+文乃＆恋花＆ツキ:Ayano&Renka&Tsuki:
+新聞部:
+男子生徒Ａ:Male Student A:
+男子生徒Ｂ:Male Student B:
+男子生徒Ｃ:Male Student C:
+男子生徒Ｄ:Male Student D:
+警察官:Officer:
+？？？:???:
+ＯＬ:OL:
