@@ -201,7 +201,7 @@ int main(int argc, char* argv[])
 	if (g_mode == op_mode::rt_llama || g_mode == op_mode::make_cache) {
 		if (pipe(opipe_fd) != 0 || pipe(ipipe_fd) != 0 || pipe2(epipe_fd, O_NONBLOCK) != 0) {
 			perror("Failed to create pipes");
-			return 2;
+			return 1;
 		}
 	}
 
@@ -623,10 +623,18 @@ int main(int argc, char* argv[])
 					auto& str = g_cache[next_id];
 					if (tty_out) {
 						llama_out = str;
-						const auto pref_pos = llama_out.find(iprefix);
-						llama_out.replace(pref_pos, iprefix.size(), "\033[0;37m"s + iprefix + "\033[0;33m");
-						const auto suff_pos = llama_out.find(isuffix);
-						llama_out.replace(suff_pos, isuffix.size(), "\033[0;37m"s + isuffix + "\033[0;1m");
+						if (!llama_out.starts_with(iprefix)) {
+							std::cerr << iprefix << " not found in translation cache." << std::endl;
+							return 1;
+						}
+						llama_out.replace(0, iprefix.size(), "\033[0;33m");
+						static const auto real_isuffix = "\n" + isuffix + (isuffix.ends_with(" ") ? "" : " ");
+						const auto suff_pos = llama_out.find(real_isuffix);
+						if (suff_pos + 1 == 0) {
+							std::cerr << isuffix << " not found in translation cache." << std::endl;
+							return 1;
+						}
+						llama_out.replace(suff_pos + 1, real_isuffix.size() - 1, "\033[0;1m");
 						std::cout << llama_out << "\033[0m" << std::flush;
 					} else {
 						std::cout << str << std::flush;
