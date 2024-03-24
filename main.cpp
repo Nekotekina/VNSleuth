@@ -241,9 +241,8 @@ int main(int argc, char* argv[])
 		for (const auto& entry : fs::recursive_directory_iterator(path, fs::directory_options::follow_directory_symlink)) {
 			if (entry.is_regular_file()) {
 				// Skip special files
-				if (entry.path().filename() == "__vnsleuth_prompt.txt")
-					continue;
-				if (entry.path().filename() == "__vnsleuth_names.txt")
+				const auto fname = entry.path().filename().string();
+				if (fname.starts_with("__vnsleuth_") && fname.ends_with(".txt"))
 					continue;
 				// Check file size (must be less than 4 GiB)
 				const auto size = entry.file_size();
@@ -305,7 +304,7 @@ int main(int argc, char* argv[])
 				s.getDigest(digest);
 				std::snprintf(buf, 41, "%08x%08x%08x%08x%08x", digest[0], digest[1], digest[2], digest[3], digest[4]);
 				cache_path = fs::path(file_list[i].first).parent_path();
-				cache_path += "/";
+				cache_path += "/__vnsleuth_";
 				cache_path += buf;
 				cache_path += ".txt";
 			}
