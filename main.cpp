@@ -8,6 +8,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <memory>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -16,6 +17,7 @@
 #include <fcntl.h>
 #include <sys/types.h>
 #ifndef _WIN32
+#include <sys/mman.h>
 #include <sys/wait.h>
 #include <unistd.h>
 #else
@@ -284,22 +286,23 @@ int main(int argc, char* argv[])
 	std::sort(file_list.begin(), file_list.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
 
 	for (std::size_t i = 0; i < file_list.size(); i++) {
-		std::ifstream file(file_list[i].first, std::ios::binary);
-		if (file.is_open()) {
-			// Read bytes into std::string
-			line.resize(file_list[i].second);
-			file.read(line.data(), line.size());
-			file.close();
+		const int fd = open(file_list[i].first.c_str(), O_RDONLY);
+		if (fd >= 0) {
+			// Map file in memory (alloc 1 more zero byte, like std::string)
+			const auto map_sz = file_list[i].second + 1;
+			const std::shared_ptr<void> file(mmap(0, map_sz, PROT_READ, MAP_PRIVATE, fd, 0), [=](void* ptr) {
+				munmap(ptr, map_sz);
+				close(fd);
+			});
 
-			// Skip translation caches
-			if (line.starts_with("SRC:") && file_list[i].first.ends_with(".txt"))
-				continue;
+			// View file as chars
+			const std::string_view data(static_cast<char*>(file.get()), file_list[i].second);
 
 			{
-				// Generate SHA1 hash, and return cache path to 123..5fbd.txt
+				// Generate SHA1 hash (only read first 1 MiB), generate cache path
 				char buf[42]{};
 				sha1::SHA1 s;
-				s.processBytes(line.data(), line.size());
+				s.processBytes(data.data(), std::min<std::size_t>(1024 * 1024, data.size()));
 				std::uint32_t digest[5];
 				s.getDigest(digest);
 				std::snprintf(buf, 41, "%08x%08x%08x%08x%08x", digest[0], digest[1], digest[2], digest[3], digest[4]);
@@ -310,7 +313,7 @@ int main(int argc, char* argv[])
 			}
 
 			std::ifstream cache(cache_path);
-			if (parse(line, cache)) {
+			if (parse(data, cache)) {
 				// Add global delimiter
 				dummy_lines++;
 				g_text.emplace_back();
@@ -404,9 +407,6 @@ int main(int argc, char* argv[])
 		std::cerr << "Nothing to do." << std::endl;
 		return 0;
 	}
-
-	line.clear();
-	line.shrink_to_fit();
 
 	// Generate args for llama.cpp
 	std::vector<const char*> llama_args;

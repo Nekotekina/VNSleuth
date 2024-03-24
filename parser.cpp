@@ -18,7 +18,7 @@ static /*thread_local*/ std::function<std::ostream&()> err = [] { return std::re
 
 // Read little-endian number from string
 template <typename T, typename Off>
-bool read_le(T& dst, const std::string& data, Off&& pos)
+bool read_le(T& dst, std::string_view data, Off&& pos)
 {
 	static_assert(std::endian::native == std::endian::little, "Big Endian platform support not implemented");
 	if (pos + sizeof(T) > data.size())
@@ -30,17 +30,17 @@ bool read_le(T& dst, const std::string& data, Off&& pos)
 }
 
 // Read null-terminated Shift-JIS string from string
-bool read_sjis(std::string& dst, const std::string& data, size_t pos)
+bool read_sjis(std::string& dst, std::string_view data, size_t pos)
 {
 	static const iconvpp::converter conv("UTF-8", "SJIS-WIN", true, 1024);
 	if (pos >= data.size())
 		return false;
 	dst.clear();
-	conv.convert(data.c_str() + pos, dst);
+	conv.convert(data.data() + pos, dst);
 	return true;
 }
 
-bool is_text_bytes(const std::string& data)
+bool is_text_bytes(std::string_view data)
 {
 	for (unsigned char c : data) {
 		// Find unexpected control characters
@@ -191,7 +191,7 @@ std::string parse_ruby_eth(const std::string& text)
 }
 
 // Return number of lines parsed
-std::size_t parse(const std::string& data, std::istream& cache)
+std::size_t parse(std::string_view data, std::istream& cache)
 {
 	std::size_t result = 0;
 

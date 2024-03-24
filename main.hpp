@@ -43,4 +43,4 @@ inline std::set<std::pair<std::string, std::string>> g_furigana;
 inline std::map<std::string, std::string, std::less<>> g_speakers{{"？？？:", "???:"}};
 
 // Parse script into global variables; return number of lines parsed
-std::size_t parse(const std::string& data, std::istream& cache);
+std::size_t parse(std::string_view data, std::istream& cache);
