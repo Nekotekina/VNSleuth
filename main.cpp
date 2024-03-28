@@ -46,9 +46,6 @@ std::string_view example = "？？？:「猫か…」\\\n"
 						   "En: This story is a work of fiction.\\\n"
 						   "JP: "sv;
 
-//
-extern const std::size_t example_lines = std::count(example.begin(), example.end(), '\n');
-
 // Print line, return original speaker name if first encountered
 std::string print_line(size_t id, int fd = -1, std::string* line = nullptr, std::string_view prefix = ""sv)
 {
@@ -68,6 +65,7 @@ std::string print_line(size_t id, int fd = -1, std::string* line = nullptr, std:
 	REPLACE(out, "『…", "『");
 	if (out.starts_with("…") && out != "…")
 		out.erase(0, "…"sv.size());
+	REPLACE(out, "？？", "？");
 	REPLACE(out, "ぁぁ", "ぁ");
 	REPLACE(out, "ぃぃ", "ぃ");
 	REPLACE(out, "ぅぅ", "ぅ");
@@ -266,7 +264,7 @@ int main(int argc, char* argv[])
 		// Load (pre-translated) names
 		std::ifstream names(names_path);
 		if (names.is_open()) {
-			while (std::getline(names, line)) {
+			while (std::getline(names, line, '\n')) {
 				if (line.ends_with("\r"))
 					line.erase(line.end() - 1);
 				if (!line.ends_with(":")) {

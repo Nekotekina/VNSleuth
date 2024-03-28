@@ -12,8 +12,6 @@ static_assert("か"sv == "\xE3\x81\x8B"sv, "This source file shall be compiled a
 
 extern std::string iprefix;
 
-extern const std::size_t example_lines;
-
 static /*thread_local*/ std::function<std::ostream&()> err = [] { return std::ref(std::cerr); };
 
 // Read little-endian number from string
@@ -103,40 +101,21 @@ void add_line(int choice, std::string name, std::string text, std::istream& cach
 		g_speakers.emplace(name_it->first, std::string());
 	if (cache) {
 		// Extract cached translation
-		auto getline = [&](std::string& src, std::string& dst) -> bool {
-			const bool started = cache.tellg() == 0;
-			std::string temp;
-			while (std::getline(cache, temp)) {
-				// Skip prompt (or garbage?)
-				if (temp.starts_with(iprefix)) {
-					break;
+		std::string temp;
+		while (std::getline(cache, temp, '\n')) {
+			// Skip prompt+example
+			if (temp.starts_with(iprefix) && !temp.ends_with("\\")) {
+				text = std::move(temp);
+				if (std::getline(cache, temp, '\n')) {
+					// Store both JP and translated lines as a single string
+					text += '\n';
+					text += temp;
+					text += '\n';
+					g_cache.emplace_back(std::move(text));
 				}
-			}
-			if (started) {
-				// Skip example
-				for (std::size_t i = 0; i < example_lines; i++) {
-					if (!std::getline(cache, temp))
-						return false;
-				}
-			}
 
-			if (!temp.starts_with(iprefix)) {
-				return false;
+				break;
 			}
-			src = std::move(temp);
-			if (!std::getline(cache, dst)) {
-				return false;
-			}
-
-			return true;
-		};
-
-		// Store both JP and EN lines as a single string
-		if (getline(name, text)) {
-			name += '\n';
-			name += text;
-			name += '\n';
-			g_cache.emplace_back(std::move(name));
 		}
 	} else {
 		// Add empty translation line
