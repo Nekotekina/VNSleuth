@@ -1,12 +1,12 @@
-おばさん:
-おばちゃん:
+おばさん:Lady:
+おばちゃん:Grandma:
 のっぺらぼう:Flatface:
 みんな:Everyone:
 アキ:Aki:
 ツキ:Tsuki:
-ブティック店員:
-一同:
-化学教師:
+ブティック店員:Boutique Salesperson:
+一同:Everyone:
+化学教師:Chemistry teacher:
 口裂け女:Screaming Woman:
 女子生徒Ａ:Female Student A:
 女子生徒Ｂ:Female Student B:
@@ -24,11 +24,11 @@
 恋花:Renka:
 恋花＆ツキ:Renka&Tsuki:
 恋花＆弥生:Renka&Yayoi:
-担任の先生:
+担任の先生:The teacher in charge:
 文乃:Ayano:
 文乃＆アキ:Ayano&Aki:
 文乃＆恋花＆ツキ:Ayano&Renka&Tsuki:
-新聞部:
+新聞部:Newspaper Club:
 男子生徒Ａ:Male Student A:
 男子生徒Ｂ:Male Student B:
 男子生徒Ｃ:Male Student C:

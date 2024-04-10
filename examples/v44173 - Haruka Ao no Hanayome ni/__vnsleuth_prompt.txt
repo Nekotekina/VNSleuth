@@ -1,5 +1,5 @@
-This is an accurate translation of a Japanese novel (follows "JP:") to English (follows "En:").
-Speaker's name always precedes the direct speech.
+This is an accurate translation of a Japanese novel to English.
+Line starting with En: only contains the translation of the preceding JP: line.
 Setting: modern day Earth, fantasy.
 Genre: slice of life, comedy, romance, fantasy, mystery, erotic novel.
 Dictionary:
