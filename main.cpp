@@ -558,6 +558,11 @@ int main(int argc, char* argv[])
 	// Previous non-unique lines are printed if they exactly precede unique line, otherwise wiped.
 	std::vector<std::string> back_buf;
 	while (std::getline(std::cin, line)) {
+		// TODO: filter duplicates
+		if (line.size() && g_text[next_id].second.find(line) + 1) {
+			// Partial match of predicted next line
+			line = g_text[next_id].second;
+		}
 		const auto it = g_loc.find(line);
 		if (line.empty() || it == g_loc.end()) {
 			// Line not found (garbage?)
