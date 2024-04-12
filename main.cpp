@@ -427,14 +427,15 @@ int main(int argc, char* argv[])
 	llama_args.push_back("1.1"); // Penalize few last tokens
 	llama_args.push_back("--ignore-eos");
 	llama_args.push_back("--interactive-first");
-	llama_args.push_back("-r");
-	llama_args.push_back("\n"); // Stop on newline
+	//llama_args.push_back("-e"); // Enable escapes
+	//llama_args.push_back("-r");
+	//llama_args.push_back("\\n"); // Stop on newline
 	llama_args.push_back("--in-prefix");
 	llama_args.push_back(iprefix.c_str());
 	//llama_args.push_back("--grammar");
 	//llama_args.push_back("root ::= [- a-zA-Z0-9~=!?.,:;'\"%&()\\n]+");
-	llama_args.push_back("--logit-restrict");
-	llama_args.push_back(" 0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ~-=!?.,:;'\"%&()\n");
+	//llama_args.push_back("--logit-restrict");
+	//llama_args.push_back(" 0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ~-=!?.,:;'\"%&()");
 	llama_args.push_back(nullptr);
 
 	// Fork a child process if requested
@@ -549,7 +550,7 @@ int main(int argc, char* argv[])
 	std::cerr << "Waiting for input..." << std::endl;
 
 	// Hint for text search (predicted entry, 0 is "impossible" default which points to pad entry)
-	size_t next_id = 0, prev_id = 0;
+	size_t next_id = 1, prev_id = 0;
 
 	// Exact match mode:
 	// When line is found and is expected, it's printed out (back_buf remains empty).
