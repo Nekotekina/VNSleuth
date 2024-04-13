@@ -104,7 +104,12 @@ std::string print_line(size_t id, int fd = -1, std::string* line = nullptr, std:
 		}
 	}
 
-	if (fd >= 0) {
+	if (fd == -1 && !line) {
+		// Passthrough mode (print-only): add \ for multiline input
+		std::cout << prefix << result << out << "\\" << std::endl;
+		// Add Ctrl+D for same-line output
+		std::cout << isuffix << speaker << "\04" << std::flush;
+	} else if (fd != -1) {
 		std::string buf(prefix);
 		buf += result;
 		buf += out;
@@ -116,8 +121,6 @@ std::string print_line(size_t id, int fd = -1, std::string* line = nullptr, std:
 			perror("Writing to pipe failed");
 			std::exit(1);
 		}
-	} else {
-		std::cout << prefix << result << out << std::endl;
 	}
 
 	if (line) {
