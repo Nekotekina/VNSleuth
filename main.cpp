@@ -416,19 +416,19 @@ int main(int argc, char* argv[])
 	llama_args.push_back("--simple-io");
 	llama_args.push_back("-f");
 	llama_args.push_back(prompt_path.c_str()); // Specify prompt
-	llama_args.push_back("--keep");
-	llama_args.push_back("-1"); // Always keep prompt in the context
-	llama_args.push_back("-n");
-	llama_args.push_back("128"); // Generate 128 tokens
-	llama_args.push_back("--temp");
-	llama_args.push_back("0.2"); // Set low temperature
-	llama_args.push_back("--top-p");
-	llama_args.push_back("0.3");
-	llama_args.push_back("--repeat-last-n");
-	llama_args.push_back("3");
-	llama_args.push_back("--repeat-penalty");
-	llama_args.push_back("1.1"); // Penalize few last tokens
-	llama_args.push_back("--ignore-eos");
+	// llama_args.push_back("--keep");
+	// llama_args.push_back("-1"); // Always keep prompt in the context
+	// llama_args.push_back("-n");
+	// llama_args.push_back("128"); // Generate 128 tokens
+	// llama_args.push_back("--temp");
+	// llama_args.push_back("0.2"); // Set low temperature
+	// llama_args.push_back("--top-p");
+	// llama_args.push_back("0.3");
+	// llama_args.push_back("--repeat-last-n");
+	// llama_args.push_back("3");
+	// llama_args.push_back("--repeat-penalty");
+	// llama_args.push_back("1.1"); // Penalize few last tokens
+	// llama_args.push_back("--ignore-eos");
 	llama_args.push_back("--interactive-first");
 	//llama_args.push_back("-e"); // Enable escapes
 	//llama_args.push_back("-r");
