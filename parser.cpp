@@ -248,14 +248,15 @@ std::size_t parse(std::string_view data, std::istream& cache)
 			if (op == 0x140 && !stack.empty()) {
 				// PRINT
 				std::string name, text, textfix;
-				text = std::move(stack.back());
+				text = stack.back();
 				if (stack.size() > 1) {
-					name = std::move(stack[0]);
+					name = stack[0];
 				}
 
 				if (stack.size() > 2)
 					err() << "PRINT: too big stack (parse error)" << std::endl;
 
+				REPLACE(text, "\01", ""); // Found in Sekachu
 				textfix = parse_ruby_eth(text);
 
 				// Add normal line
