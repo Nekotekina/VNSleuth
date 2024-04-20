@@ -15,6 +15,7 @@ I made VNSleuth for myself out of curiosity for new tech and also laziness. Desp
 1. Take llm_common.sh, llm_qwen14.sh, llm_qwen14vn.sh scripts from /tools/, **read and edit** them appropriately and place them in $HOME/bin directory. There are more examples, like llm_qwen34.sh for 34B model, but these scripts have very small differences.
 1. Build `vnsleuth` by running make, `make install` will copy the executable into $HOME/bin.
 1. Build `xclipmonitor` in tools/xclipmonitor by running make, `make install` will copy the executable into $HOME/bin.
+1. Make sure `xsel` utility is installed on your system, via `sudo apt install xsel` on Ubuntu, for example.
 
 ## Workflow
 1. Determine whether your VN's engine is supported. Extract all script files into a dedicated directory. Automated tool for script extraction may be added in future.

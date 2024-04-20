@@ -13,5 +13,5 @@ llm_qwen32.sh -l 33015-0 -l 12448-1 -l 27188-5 -l 48780-5\
 	--repeat-last-n 3\
 	--repeat-penalty 1.1\
 	--ignore-eos\
-	--logit-restrict " 0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ~-=!?.,:;'"\""%&()"\
+	--logit-restrict " 0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ~-=\!\?.,:;'"\""%&()\n"\
 	"$@"
