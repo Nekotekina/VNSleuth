@@ -13,6 +13,7 @@
 #include <string>
 #include <sys/types.h>
 #include <sys/wait.h>
+#include <termios.h>
 #include <unistd.h>
 
 volatile bool g_stop = false;
@@ -22,6 +23,29 @@ void sigh(int) { g_stop = true; }
 int main()
 {
 	signal(SIGINT, sigh);
+
+	// Set terminal to raw mode
+	static struct termios told {};
+	if (tcgetattr(0, &told) < 0) {
+		perror("tcgetattr failed");
+		return 1;
+	}
+
+	told.c_lflag &= ~ICANON;
+	told.c_lflag &= ~ECHO;
+	told.c_cc[VMIN] = 1;
+	told.c_cc[VTIME] = 0;
+	if (tcsetattr(0, TCSANOW, &told) < 0) {
+		perror("tcsetattr failed");
+		return 1;
+	}
+
+	told.c_lflag |= ICANON;
+	told.c_lflag |= ECHO;
+	atexit([] {
+		// Reset terminal mode
+		tcsetattr(0, TCSADRAIN, &told);
+	});
 
 	Display* disp;
 	Window root;
@@ -51,7 +75,14 @@ int main()
 			.revents = 0,
 		};
 
-		if (XPending(disp) > 0 || poll(&pfd, 1, 300) > 0) {
+		struct pollfd ifd = {
+			.fd = STDIN_FILENO,
+			.events = POLLIN,
+			.revents = 0,
+		};
+
+		struct pollfd pfds[2]{pfd, ifd}; // A copy of pfds
+		if (XPending(disp) > 0 || (poll(pfds, sizeof(pfds) / sizeof(pfds[0]), 300), poll(&pfd, 1, 0) > 0)) {
 			const auto s0 = std::chrono::steady_clock::now();
 			XNextEvent(disp, &evt);
 			const auto s1 = std::chrono::steady_clock::now();
@@ -60,10 +91,37 @@ int main()
 			}
 		}
 
+		// Send keypresses read from stdin as control characters
+		if (poll(&ifd, 1, 0) > 0) {
+			char c{};
+			if (read(STDIN_FILENO, &c, 1) == 1) {
+				if (c == '\03') {
+					// Stop on Ctrl+C
+					break;
+				}
+				if (c >= 'a' && c <= 'z') {
+					// Convert lowercase letters
+					c -= 'a';
+					c += 1;
+				}
+				if (c > 0 && c < 32) {
+					putchar(c);
+					fflush(stdout);
+				}
+			}
+
+			// Retry poll for non-blocking read
+			continue;
+		} else {
+			perror("Reading from stdin failed");
+			return 1;
+		}
+	}
+
 		int opipe_fd[2]{}; // [0] Reading from xsel stdout
 		if (pipe2(opipe_fd, O_NONBLOCK) != 0) {
-			perror("Failed to create pipe:");
-			return 1;
+		perror("Failed to create pipe");
+		return 1;
 		}
 
 		// Fork a child process
@@ -76,7 +134,7 @@ int main()
 
 			// Execute xsel
 			execvp(args[0], const_cast<char**>(args));
-			perror("execvp failed for 'xsel':");
+			perror("execvp failed for 'xsel'");
 			return 1;
 		}
 
@@ -89,8 +147,8 @@ int main()
 				int wstatus = 0;
 				if (waitpid(pid, &wstatus, WNOHANG) == pid) {
 					if (int res = WEXITSTATUS(wstatus)) {
-						perror("xsel failed:");
-						return res;
+					perror("xsel failed");
+					return res;
 					}
 					break;
 				}
@@ -134,6 +192,7 @@ int main()
 
 		close(opipe_fd[0]);
 		close(opipe_fd[1]);
+		buf.clear();
 	}
 
 	XCloseDisplay(disp);
