@@ -1,5 +1,7 @@
 #include <X11/Xatom.h>
 #include <X11/Xlib.h>
+#include <X11/extensions/XInput.h>
+#include <X11/extensions/XInput2.h>
 #include <X11/extensions/Xfixes.h>
 #include <algorithm>
 #include <cerrno>
@@ -20,7 +22,7 @@ volatile bool g_stop = false;
 
 void sigh(int) { g_stop = true; }
 
-int main()
+int main(int argc, char* argv[])
 {
 	signal(SIGINT, sigh);
 
@@ -62,6 +64,20 @@ int main()
 	clip = XInternAtom(disp, "CLIPBOARD", False);
 	XFixesSelectSelectionInput(disp, root, clip, XFixesSetSelectionOwnerNotifyMask);
 
+	XIEventMask mask[2];
+	mask[0].deviceid = XIAllDevices;
+	mask[0].mask_len = XIMaskLen(XI_LASTEVENT);
+	mask[0].mask = (unsigned char*)calloc(mask[0].mask_len, sizeof(char));
+	mask[1].deviceid = XIAllMasterDevices;
+	mask[1].mask_len = XIMaskLen(XI_LASTEVENT);
+	mask[1].mask = (unsigned char*)calloc(mask[1].mask_len, sizeof(char));
+	XISetMask(mask[1].mask, XI_RawButtonPress);
+	//XISetMask(mask[1].mask, XI_RawButtonRelease);
+
+	XISelectEvents(disp, root, &mask[0], 2);
+	free(mask[0].mask);
+	free(mask[1].mask);
+
 	// -b: retrieve CLIPBOARD
 	// -t: timeout 100 ms
 	const char* args[] = {"xsel", "-b", "-t", "100", nullptr};
@@ -89,6 +105,16 @@ int main()
 			if (long d = std::chrono::duration_cast<std::chrono::milliseconds>(s1 - s0).count(); d > 100) {
 				fprintf(stderr, "xclipmonitor: XNextEvent took too long: %ldms\n", d);
 			}
+
+			XGenericEventCookie* cookie = (XGenericEventCookie*)&evt.xcookie;
+			if (XGetEventData(disp, cookie) && cookie->type == GenericEvent) {
+				XIRawEvent* event = (XIRawEvent*)cookie->data;
+				if (cookie->evtype == XI_RawButtonPress && event->detail == 9) {
+					putchar('\n');
+					fflush(stdout);
+					continue;
+				}
+			}
 		}
 
 		// Send keypresses read from stdin as control characters
@@ -106,22 +132,23 @@ int main()
 				}
 				if (c > 0 && c < 32) {
 					putchar(c);
+					if (c != '\n')
+						putchar('\n');
 					fflush(stdout);
 				}
+			} else {
+				perror("Reading from stdin failed");
+				return 1;
 			}
 
 			// Retry poll for non-blocking read
 			continue;
-		} else {
-			perror("Reading from stdin failed");
-			return 1;
 		}
-	}
 
 		int opipe_fd[2]{}; // [0] Reading from xsel stdout
 		if (pipe2(opipe_fd, O_NONBLOCK) != 0) {
-		perror("Failed to create pipe");
-		return 1;
+			perror("Failed to create pipe");
+			return 1;
 		}
 
 		// Fork a child process

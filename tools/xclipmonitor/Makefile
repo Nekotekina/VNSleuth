@@ -1,6 +1,6 @@
 CXX = g++
 CXXFLAGS = -std=c++20 -Wall -Wextra -O2 -g
-LIBS = -lX11 -lXfixes
+LIBS = -lX11 -lXfixes -lXi
 
 TARGET = xclipmonitor
 SOURCES = xclipmonitor.cpp

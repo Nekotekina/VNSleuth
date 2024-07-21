@@ -10,8 +10,6 @@
 
 static_assert("か"sv == "\xE3\x81\x8B"sv, "This source file shall be compiled as UTF-8 text");
 
-extern std::string iprefix;
-
 static /*thread_local*/ std::function<std::ostream&()> err = [] { return std::ref(std::cerr); };
 
 // Read little-endian number from string
@@ -28,7 +26,7 @@ bool read_le(T& dst, std::string_view data, Off&& pos)
 }
 
 // Read null-terminated Shift-JIS string from string
-bool read_sjis(std::string& dst, std::string_view data, size_t pos)
+bool read_sjis(std::string& dst, std::string_view data, std::size_t pos)
 {
 	static const iconvpp::converter conv("UTF-8", "SJIS-WIN", true, 1024);
 	if (pos >= data.size())
@@ -53,7 +51,7 @@ bool is_text_bytes(std::string_view data)
 	return true;
 }
 
-void add_line(int choice, std::string name, std::string text, std::istream& cache)
+void add_line(int choice, std::string name, std::string text)
 {
 	if (!is_text_bytes(name))
 		err() << "Bad line (name): " << name << std::endl;
@@ -90,37 +88,20 @@ void add_line(int choice, std::string name, std::string text, std::istream& cach
 		name = "選択肢#" + std::to_string(choice) + ":";
 	}
 
-	auto [name_it, ok1] = g_loc.try_emplace(std::move(name), 0);
-	auto [text_it, ok2] = g_loc.try_emplace(std::move(text), g_text.size());
-	name_it->second = 0; // Names are never unique
-	if (!ok2)
-		text_it->second = 0; // Mark if not unique
+	line_id id{};
+	id.first = g_lines.segs.size() - 1;
+	id.second = g_lines.segs[id.first].lines.size();
 
-	g_text.emplace_back(name_it->first, text_it->first);
-	if (name_it->first.size() && !choice)
-		g_speakers.emplace(name_it->first, std::string());
-	if (cache) {
-		// Extract cached translation
-		std::string temp;
-		while (std::getline(cache, temp, '\n')) {
-			// Skip prompt+example
-			if (temp.starts_with(iprefix) && !temp.ends_with("\\")) {
-				text = std::move(temp);
-				if (std::getline(cache, temp, '\n')) {
-					// Store both JP and translated lines as a single string
-					text += '\n';
-					text += temp;
-					text += '\n';
-					g_cache.emplace_back(std::move(text));
-				}
+	auto [text_it, ok] = g_strings.emplace(std::move(text), id);
+	if (!ok)
+		text_it->second = c_bad_id; // Mark if not unique
 
-				break;
-			}
-		}
-	} else {
-		// Add empty translation line
-		g_cache.emplace_back();
-	}
+	line_info& line = g_lines.segs[id.first].lines.emplace_back();
+	line.name = std::move(name);
+	line.text = std::as_const(text_it->first);
+
+	if (!line.name.empty() && !choice)
+		g_speakers.emplace(line.name, std::string());
 }
 
 // Add furigana
@@ -170,9 +151,9 @@ std::string parse_ruby_eth(const std::string& text)
 }
 
 // Return number of lines parsed
-std::size_t parse(std::string_view data, std::istream& cache)
+uint parse(std::string_view data)
 {
-	std::size_t result = 0;
+	uint result = 0;
 
 	// Detect script format then parse appropriately
 	const bool is_text = is_text_bytes(data);
@@ -241,7 +222,7 @@ std::size_t parse(std::string_view data, std::istream& cache)
 
 					// Add choices
 					for (unsigned i = 1; i < stack.size(); i++) {
-						add_line(i, "", parse_ruby_eth(stack[i - 1]), cache);
+						add_line(i, "", parse_ruby_eth(stack[i - 1]));
 					}
 				}
 			}
@@ -260,7 +241,7 @@ std::size_t parse(std::string_view data, std::istream& cache)
 				textfix = parse_ruby_eth(text);
 
 				// Add normal line
-				add_line(0, std::move(name), std::move(textfix), cache);
+				add_line(0, std::move(name), std::move(textfix));
 				result++;
 			}
 

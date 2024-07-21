@@ -1,7 +1,10 @@
 #include "main.hpp"
+#include "common.h"
+#include "llama.h"
 #include "tools/tiny_sha1.hpp"
 #include <algorithm>
 #include <chrono>
+#include <csignal>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
@@ -18,16 +21,19 @@
 #include <sys/types.h>
 #ifndef _WIN32
 #include <sys/mman.h>
-#include <sys/wait.h>
 #include <unistd.h>
 #else
+#ifndef NOMINMAX
 #define NOMINMAX
+#endif
 #define WIN32_LEAN_AND_MEAN
-#include <io.h>
 #include <windows.h>
 #endif
 
 static_assert("か"sv == "\xE3\x81\x8B"sv, "This source file shall be compiled as UTF-8 text");
+
+// Exit flag
+volatile bool g_stop = false;
 
 // Guiding prefix for original lines of text
 std::string iprefix = "JP: ";
@@ -39,19 +45,16 @@ std::string iprefix = "JP: ";
 // This may provoke Chinese-speaking model to output Chinese.
 std::string isuffix = "En:";
 
-// Translation example injected after prompt (may be superfluous for some models or even harmful)
-std::string_view example = "？？？:「猫か…」\\\n"
-						   "En: ???: \"Ah, so it's a cat...\"\\\n"
-						   "JP: この物語はフィクションです。\\\n"
-						   "En: This story is a work of fiction.\\\n"
-						   "JP: "sv;
+// Translation example injected after prompt
+std::string example = "JP: この物語はフィクションです。\n"
+					  "En: This story is a work of fiction.\n";
 
 // Print line, return original speaker name if first encountered
-std::string print_line(size_t id, int fd = -1, std::string* line = nullptr, std::string_view prefix = ""sv)
+std::string print_line(line_id id, std::string* line = nullptr)
 {
 	// Reduce token count and also fix potential issues with borked translations
 	std::string out;
-	out += g_text[id].second;
+	out += g_lines[id].text;
 	REPLACE(out, "\t", "　");
 	REPLACE(out, "〜", "～"); // Use one more typical for SJIS-WIN
 	REPLACE(out, "……", "…");
@@ -85,7 +88,7 @@ std::string print_line(size_t id, int fd = -1, std::string* line = nullptr, std:
 	REPLACE(out, "ョョ", "ョ");
 	REPLACE(out, "ッッ", "ッ");
 
-	auto result = std::string(g_text[id].first);
+	auto result = g_lines[id].name;
 	bool ret = false;
 
 	std::string speaker;
@@ -104,32 +107,28 @@ std::string print_line(size_t id, int fd = -1, std::string* line = nullptr, std:
 		}
 	}
 
-	if (fd == -1 && !line) {
+	if (g_mode == op_mode::print_only) {
 		// Passthrough mode (print-only): add \ for multiline input
-		std::cout << prefix << result << out << "\\" << std::endl;
+		std::cout << iprefix << result << out << "\\" << std::endl;
 		// Add Ctrl+D for same-line output
 		std::cout << isuffix << speaker << "\04" << std::flush;
-	} else if (fd != -1) {
-		std::string buf(prefix);
-		buf += result;
-		buf += out;
-		buf += "\\\n"; // Add \ for multiline input
-		buf += isuffix;
-		buf += speaker;
-		buf += "\04\n"; // Finish input without a newline
-		if (write(fd, buf.data(), buf.size()) + size_t{} != buf.size()) {
-			perror("Writing to pipe failed");
-			std::exit(1);
-		}
 	}
 
 	if (line) {
-		line->append(prefix);
+		line->append(iprefix);
 		line->append(result);
 		line->append(out);
 		line->append("\n");
 		line->append(isuffix);
 		line->append(speaker);
+
+		if (g_mode == op_mode::rt_llama) {
+			// Print colored output without prefixes
+			if (speaker.starts_with(" "))
+				speaker.erase(0, 1);
+			std::cout << "\033[0;33m" << result << out << std::endl;
+			std::cout << "\033[0;1m" << speaker << std::flush;
+		}
 	}
 
 	if (ret) {
@@ -160,6 +159,66 @@ void update_names(const std::string& path)
 	}
 }
 
+bool update_segment(std::string_view prompt, uint seg)
+{
+	std::string dump = "SRC:";
+	dump += g_lines.segs[seg].src_name;
+	dump += "\n";
+	dump += prompt;
+	for (auto& line : g_lines.segs[seg].lines) {
+		if (line.tr_text.empty())
+			break;
+		dump += line.tr_text;
+	}
+	std::ofstream file(g_lines.segs[seg].cache_name + ".tmp", std::ios_base::trunc | std::ios_base::binary);
+	if (!file.is_open()) {
+		std::cerr << "Failed to open " << g_lines.segs[seg].cache_name << ".tmp" << std::endl;
+		return false;
+	}
+	file.write(dump.data(), dump.size());
+	file.close();
+	fs::rename(g_lines.segs[seg].cache_name + ".tmp", g_lines.segs[seg].cache_name);
+	return true;
+}
+
+uint load_translation(uint seg, const std::string& path)
+{
+	std::ifstream cache(path);
+	if (!cache.is_open())
+		throw std::runtime_error("Failed to open " + path);
+
+	// Extract cached translation
+	line_id id{seg, 0};
+	std::string temp;
+	while (std::getline(cache, temp, '\n')) {
+		// Skip prompt+example (example isn't stored anymore, it's an artifact)
+		if (temp.starts_with(iprefix) && !temp.ends_with("\\")) {
+			std::string text = std::move(temp);
+			if (std::getline(cache, temp, '\n')) {
+				// Store both original and translated lines as a single string
+				text += '\n';
+				text += temp;
+				text += '\n';
+				g_lines[id].tr_text = std::move(text);
+				g_lines.advance(id);
+			} else {
+				break;
+			}
+		}
+	}
+
+	// Clear remaining lines
+	for (auto id2 = id; id2 != c_bad_id; g_lines.advance(id2)) {
+		g_lines[id2].tr_text = {};
+	}
+
+	return id.second;
+}
+
+extern bool translate(gpt_params& params, line_id id);
+
+void sigh(int) { g_stop = true; }
+
 int main(int argc, char* argv[])
 {
 	const bool is_piped = !isatty(STDIN_FILENO);
@@ -172,47 +231,28 @@ int main(int argc, char* argv[])
 		argc = 1;
 	}
 
-	if (argc < 2 || g_mode != op_mode::make_cache) {
-		std::cerr << "VNSleuth v0.1" << std::endl;
-	}
-
 	if (argc < 2) {
-		std::cerr << "Usage: " << argv[0] << " <script_directory> <llama.cpp exec> [<optional llama.cpp args>...]" << std::endl;
-		std::cerr << "TTY+no exec = print furigana, some information, and exit." << std::endl;
-		std::cerr << "TTY+llama = generate translation cache." << std::endl;
-		std::cerr << "pipe+no exec = print cached translation in real time (must be created)." << std::endl;
-		std::cerr << "pipe+llama = translate in real time (not recommended)." << std::endl;
+		std::cerr << "VNSleuth v0.2" << std::endl;
+		std::cerr << "Usage: " << argv[0] << " <script_directory> [-m <model> <LLAMA args>...]" << std::endl;
+		std::cerr << "TTY+no args = print furigana, some information, and exit." << std::endl;
+		std::cerr << "TTY+model = generate translation cache." << std::endl;
 		std::cerr << "pipe+- = only send preprocessed lines to stdout." << std::endl;
+		std::cerr << "pipe+no args = print cached translation in real time (must be created)." << std::endl;
+		std::cerr << "pipe+model = translate in real time (recommended)." << std::endl;
 		std::cerr << "Nothing to do." << std::endl;
 		return 1;
 	}
 
-	// Create configuration directory
-	std::string cfg_dir;
-	if (const char* conf = ::getenv("XDG_CONFIG_HOME"))
-		cfg_dir = std::string(conf) + "/vnsleuth/";
-	else if (const char* home = ::getenv("HOME"))
-		cfg_dir = std::string(home) + "/.config/vnsleuth/";
-	else
-		cfg_dir = "./config/";
-	fs::create_directories(cfg_dir);
-
-	// Create pipes for communication with the child process
-	int opipe_fd[2]{}; // [0] Reading from llama.cpp stdout
-	int ipipe_fd[2]{}; // [1] Writing to llama.cpp stdin
-	int epipe_fd[2]{}; // [0] Reading from llama.cpp stderr
-	if (g_mode == op_mode::rt_llama || g_mode == op_mode::make_cache) {
-		if (pipe(opipe_fd) != 0 || pipe(ipipe_fd) != 0 || pipe2(epipe_fd, O_NONBLOCK) != 0) {
-			perror("Failed to create pipes");
-			return 1;
-		}
+	if (argv[1] == "--help"sv) {
+		std::cerr << "(TODO) run without arguments to see usage example." << std::endl;
+		return 1;
 	}
 
+	// Get startup timestamp
 	const auto g_now = std::chrono::steady_clock::now();
 
 	// Parse scripts in a given directory
-	std::string line, llama_out, cache_path, prompt_path, names_path;
-	std::size_t dummy_lines = 1;
+	std::string line, cache_path, prompt_path, names_path, replaces_path;
 	bool is_incomplete = false;
 
 	// Load file list recursively
@@ -261,12 +301,26 @@ int main(int argc, char* argv[])
 			std::cerr << "Translation prompt is required." << std::endl;
 			return 1;
 		}
+
+		if (!prompt_path.empty() && g_mode == op_mode::print_info) {
+			// Create dummy prompt
+			std::ofstream p(prompt_path, std::ios_base::trunc);
+			if (p.is_open()) {
+				p << "This is an accurate translation of a Japanese novel to English." << std::endl;
+				p << "Line starting with En: only contains the translation of the preceding JP: line." << std::endl;
+				p << "All honorifics are always preserved as -san, -chan, -sama, etc." << std::endl;
+				p << "<START>" << std::endl;
+				p.close();
+				std::cerr << "Dummy translation prompt created: " << prompt_path << std::endl;
+			}
+		}
 	}
 
-	if (!names_path.empty()) {
+	auto reload_names = [&] {
 		// Load (pre-translated) names
 		std::ifstream names(names_path);
 		if (names.is_open()) {
+			g_speakers.clear();
 			while (std::getline(names, line, '\n')) {
 				if (line.ends_with("\r"))
 					line.erase(line.end() - 1);
@@ -281,12 +335,16 @@ int main(int argc, char* argv[])
 		} else {
 			std::cerr << "Translation names not found: " << names_path << std::endl;
 		}
+	};
+
+	if (!names_path.empty()) {
+		reload_names();
 	}
 
 	// Sort file list alphabetically
 	std::sort(file_list.begin(), file_list.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
 
-	for (std::size_t i = 0; i < file_list.size(); i++) {
+	for (uint i = 0; i < file_list.size(); i++) {
 		const int fd = open(file_list[i].first.c_str(), O_RDONLY);
 		if (fd >= 0) {
 			// Map file in memory (alloc 1 more zero byte, like std::string)
@@ -313,63 +371,29 @@ int main(int argc, char* argv[])
 				cache_path += ".txt";
 			}
 
-			std::ifstream cache(cache_path);
-			if (parse(data, cache)) {
-				// Add global delimiter
-				dummy_lines++;
-				g_text.emplace_back();
-				g_cache.emplace_back();
-
-				if (g_mode == op_mode::make_cache && !is_incomplete) {
-					// Spawn process for each non-empty file
-					auto& arg = file_list[i].first;
-					argv[1] = arg.data();
-					std::cerr << "Translating: " << arg << " -> " << cache_path << std::endl;
-					if (cache.is_open()) {
-						std::cerr << "File exists, skipping." << std::endl;
-						continue;
-					}
-					pid_t pid = fork();
-					if (pid == 0) {
-						execvp(argv[0], argv);
-						perror("execvp failed for vnsleuth:");
-						return 1;
-					}
-					int wstatus = 0;
-					waitpid(pid, &wstatus, 0);
-					if (int res = WEXITSTATUS(wstatus)) {
-						std::cerr << "Child process terminated abnormally: " << res << std::endl;
-						return res;
-					}
-				}
-
-				if (g_mode == op_mode::print_info || g_mode == op_mode::rt_cached) {
+			g_lines.segs.emplace_back();
+			g_lines.segs.back().cache_name = cache_path;
+			g_lines.segs.back().src_name = file_list[i].first;
+			if (parse(data)) {
+				if (g_mode == op_mode::print_info || g_mode == op_mode::rt_cached || g_mode == op_mode::rt_llama) {
 					if (g_mode == op_mode::print_info) {
 						std::cerr << "Found file: " << file_list[i].first << std::endl;
 						std::cerr << "Cache file: " << cache_path;
 					}
 					if (fs::is_regular_file(cache_path)) {
-						if (g_mode == op_mode::print_info)
-							std::cerr << " (exists)" << std::endl;
-						if (!cache.is_open()) {
-							std::cerr << "Error: Could not open translation cache: " << cache_path << std::endl;
-							return 1;
-						}
-						if (g_cache.size() != g_text.size()) {
-							std::cerr << "Error: Translation cache terminated abruptly: " << cache_path << std::endl;
-							return 1;
-						}
-						std::getline(cache, line);
-						if (!cache.eof()) {
-							std::cerr << "Error: Translation cache exceeds expected size: " << cache_path << std::endl;
-							return 1;
-						}
+						const auto tr_lines = load_translation(i, cache_path);
+						if (g_lines[g_lines.last()].tr_text.empty() && g_mode == op_mode::print_info)
+							std::cerr << " (partial)" << std::endl;
+						else if (g_mode == op_mode::print_info)
+							std::cerr << (tr_lines ? " (exists)" : " (empty!)") << std::endl;
 					} else {
 						if (g_mode == op_mode::print_info)
 							std::cerr << " (not found)" << std::endl;
 						is_incomplete = true;
 					}
 				}
+			} else {
+				g_lines.segs.pop_back();
 			}
 		} else if (file_list.size() == 1) {
 			std::cerr << "Error: Could not open file: " << file_list[i].first << std::endl;
@@ -378,15 +402,9 @@ int main(int argc, char* argv[])
 	}
 
 	if (g_mode != op_mode::make_cache || !is_incomplete) {
-		std::cerr << "Loaded files: " << dummy_lines - 1 << std::endl;
-		std::cerr << "Loaded lines: " << g_text.size() - dummy_lines << std::endl;
+		std::cerr << "Loaded files: " << g_lines.segs.size() << std::endl;
+		std::cerr << "Loaded lines: " << g_lines.count_lines() << std::endl;
 		std::cerr << "Loaded names: " << g_speakers.size() - 1 << std::endl;
-	}
-
-	if (g_mode == op_mode::make_cache && !is_incomplete) {
-		const auto elaps = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - g_now);
-		std::cerr << "Cache generation completed. Elapsed: " << elaps.count() << "s" << std::endl;
-		return 0;
 	}
 
 	if (is_incomplete) {
@@ -394,14 +412,14 @@ int main(int argc, char* argv[])
 			std::cerr << "Some cache files were not found." << std::endl;
 	}
 
-	if (g_mode == op_mode::print_info || g_text.size() <= 1) {
+	if (g_mode == op_mode::print_info || g_lines.segs.empty()) {
 		// Print known furigana
 		for (auto&& [type_as, read_as] : g_furigana) {
 			std::cerr << type_as << "=" << read_as << std::endl;
 		}
 
 		// Update names
-		if (g_text.size() > 1 && g_speakers.size() > 1) {
+		if (!g_lines.segs.empty() && g_speakers.size() > 1) {
 			update_names(names_path);
 		}
 
@@ -409,151 +427,149 @@ int main(int argc, char* argv[])
 		return 0;
 	}
 
-	// Generate args for llama.cpp
-	std::vector<const char*> llama_args;
-	for (int i = 2; i < argc; i++)
-		llama_args.push_back(argv[i]);
-	llama_args.push_back("--simple-io");
-	llama_args.push_back("-f");
-	llama_args.push_back(prompt_path.c_str()); // Specify prompt
-	// llama_args.push_back("--keep");
-	// llama_args.push_back("-1"); // Always keep prompt in the context
-	// llama_args.push_back("-n");
-	// llama_args.push_back("128"); // Generate 128 tokens
-	// llama_args.push_back("--temp");
-	// llama_args.push_back("0.2"); // Set low temperature
-	// llama_args.push_back("--top-p");
-	// llama_args.push_back("0.3");
-	// llama_args.push_back("--repeat-last-n");
-	// llama_args.push_back("3");
-	// llama_args.push_back("--repeat-penalty");
-	// llama_args.push_back("1.1"); // Penalize few last tokens
-	// llama_args.push_back("--ignore-eos");
-	llama_args.push_back("--interactive-first");
-	//llama_args.push_back("-e"); // Enable escapes
-	//llama_args.push_back("-r");
-	//llama_args.push_back("\\n"); // Stop on newline
-	llama_args.push_back("--in-prefix");
-	llama_args.push_back(iprefix.c_str());
-	//llama_args.push_back("--grammar");
-	//llama_args.push_back("root ::= [- a-zA-Z0-9~=!?.,:;'\"%&()\\n]+");
-	//llama_args.push_back("--logit-restrict");
-	//llama_args.push_back(" 0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ~-=!?.,:;'\"%&()");
-	llama_args.push_back(nullptr);
+	gpt_params params{};
+	params.n_gpu_layers = 999;
+	params.seed = 0;
+	params.n_ctx = 4096;
+	params.n_batch = 4096;
+	params.n_predict = 128;
+	params.sparams.temp = 0.2;
+	params.sparams.top_p = 0.3;
+	params.sparams.penalty_last_n = 3;
+	params.sparams.penalty_repeat = 1.1;
+	auto reload_prompt = [&]() {
+		// Load prompt
+		std::ifstream p(prompt_path);
+		if (p.is_open()) {
+			params.prompt = {};
+			char c{};
+			while (p.get(c))
+				params.prompt += c;
 
-	// Fork a child process if requested
-	pid_t pid = argc >= 3 && argv[2] != "-"sv ? fork() : 1;
-	if (pid == 0) {
-		// Inside the child process
-		while ((dup2(ipipe_fd[0], STDIN_FILENO) == -1) && (errno == EINTR)) {}
-		while ((dup2(opipe_fd[1], STDOUT_FILENO) == -1) && (errno == EINTR)) {}
-		while ((dup2(epipe_fd[1], STDERR_FILENO) == -1) && (errno == EINTR)) {}
-		close(ipipe_fd[0]);
-		close(ipipe_fd[1]);
-		close(opipe_fd[0]);
-		close(opipe_fd[1]);
-		close(epipe_fd[0]);
-		close(epipe_fd[1]);
-
-		// Execute llama.cpp (main)
-		execvp(llama_args[0], const_cast<char**>(llama_args.data()));
-		perror("execvp failed for llama.cpp");
-		return 1;
-	} else if (pid > 1) {
-		close(ipipe_fd[0]);
-		close(opipe_fd[1]);
-		close(epipe_fd[1]);
-	}
-
-	// Read from the pipe until JP: (iprefix) is encountered
-	auto read_translated = [&]() -> bool {
-		char buf{};
-		while (true) {
-			auto r = read(opipe_fd[0], &buf, 1);
-			if (r <= 0) {
-				if (r < 0) {
-					perror("Reading from pipe failed");
-				}
-				std::string err;
-				err.resize(10000);
-				err.resize(std::max<ssize_t>(0, read(epipe_fd[0], err.data(), err.size())));
-				std::cerr << err << std::flush;
-				return false;
-			}
-			llama_out += buf;
-			static const auto real_iprefix = "\n" + iprefix;
-			if (llama_out.ends_with(real_iprefix))
-				return true;
+			// Preprocess
+			REPLACE(params.prompt, "\r", "");
+			if (!params.prompt.ends_with("\n"))
+				params.prompt += '\n';
+		} else {
+			std::cerr << "Failed to load prompt: " << prompt_path << std::endl;
 		}
 	};
-
-	if (pid > 1) {
-		// Initialize translation
-		llama_out += "SRC:";
-		llama_out += argv[1];
-		llama_out += "\n";
-		if (!read_translated()) {
-			std::cerr << "Translation prompt not received." << std::endl;
+	reload_prompt();
+	if (argc > 2) {
+		if (!gpt_params_parse(argc - 1, argv + 1, params)) {
+			gpt_params_print_usage(argc - 1, argv + 1, params);
 			return 1;
 		}
+
+		// Initialize with dummy id
+		if (!translate(params, c_bad_id))
+			return 1;
 	}
+
+	if (is_piped) {
+		std::cerr << "Waiting for input..." << std::endl;
+		// Hack to prevent interleaving stderr/stdout
+		usleep(300'000);
+	}
+
+	line_id next_id = c_bad_id;
+	line_id prev_id = c_bad_id;
+
+	// List of IDs that must be processed (possibly more than once)
+	std::vector<line_id> id_queue;
+	auto flush_id_queue = [&](bool rewrite = false) -> bool {
+		if (g_mode == op_mode::print_only) {
+			for (auto& id : id_queue) {
+				if (static bool prompt_sent = false; !std::exchange(prompt_sent, true)) {
+					// Send prompt and example before first line
+					std::string out = params.prompt + example;
+					REPLACE(out, "\n", "\\\n");
+					std::cout << out << std::flush;
+				}
+				print_line(id);
+			}
+			id_queue.clear();
+			return true;
+		}
+
+		for (auto& id : id_queue) {
+			if (g_mode != op_mode::make_cache && id.second == 0 && !rewrite) {
+				std::cerr << "Starting new segment..." << std::endl << std::flush;
+			}
+			if (rewrite) {
+				if (!translate(params, id))
+					return false;
+				continue;
+			}
+			auto& line = g_lines[id];
+			if (!line.tr_text.empty()) {
+				if (g_mode == op_mode::make_cache)
+					continue;
+				auto out = line.tr_text; // copy
+				if (!out.starts_with(iprefix)) {
+					std::cerr << iprefix << " not found in translation cache." << std::endl;
+					return false;
+				}
+				out.replace(0, iprefix.size(), "\033[0;33m");
+				static const auto real_isuffix = "\n" + isuffix + (isuffix.ends_with(" ") ? "" : " ");
+				const auto suff_pos = out.find(real_isuffix);
+				if (suff_pos + 1 == 0) {
+					std::cerr << isuffix << " not found in translation cache." << std::endl;
+					return false;
+				}
+				out.replace(suff_pos + 1, real_isuffix.size() - 1, "\033[0;1m");
+				std::cout << out << "\033[0m" << std::flush;
+			} else if (g_mode == op_mode::rt_cached) {
+				std::cerr << "Error: Translation cache is incomplete" << std::endl;
+				break;
+			} else {
+				if (!translate(params, id))
+					return false;
+			}
+		}
+
+		if (g_mode != op_mode::rt_llama) {
+			id_queue.clear();
+		}
+		return true;
+	};
+
+	// Setup Ctrl+C handler
+	signal(SIGINT, sigh);
 
 	if (g_mode == op_mode::make_cache) {
-		// Send all lines in a script sequentially for translation
-		const auto _now = std::chrono::steady_clock::now();
-		const auto nlines = g_text.size() - 2;
-		std::ofstream cache(cache_path + ".tmp", std::ios::trunc);
-		if (!cache.is_open()) {
-			std::cerr << "Failed to open file " << cache_path << ".tmp" << std::endl;
-			return 1;
-		}
-		std::cerr << "Translated lines: 0/" << nlines << std::flush;
-		for (std::size_t i = 1; i < nlines + 1; i++) {
-			const auto spker = print_line(i, ipipe_fd[1], &llama_out, i == 1 ? example : "");
-			cache << llama_out;
-			llama_out.clear();
-			if (!read_translated()) {
+		// Demand all possible IDs
+		for (uint i = 0; !g_stop && i < g_lines.segs.size(); i++) {
+			const auto _now = std::chrono::steady_clock::now();
+			const auto nlines = g_lines.segs[i].lines.size();
+			std::cerr << "Translating: " << g_lines.segs[i].src_name << " -> " << g_lines.segs[i].cache_name << std::endl;
+			std::cerr << "Translated lines: 0/" << nlines << std::flush;
+			for (uint j = 0; j < nlines; j++) {
+				id_queue.emplace_back(i, j);
+				if (!flush_id_queue())
+					return 1;
+				const auto stamp = std::chrono::steady_clock::now();
+				const auto elaps = std::chrono::duration_cast<std::chrono::milliseconds>(stamp - _now);
+				std::cerr << "\rTranslated lines: " << (j + 1) << "/" << nlines;
+				std::cerr << "... (" << elaps.count() / (j + 1) / 1000. << "s/line)    ";
+				std::cerr << std::flush;
+				if (g_stop)
+					break;
+			}
+			update_names(names_path);
+			if (!translate(params, c_bad_id))
 				return 1;
-			}
-			if (spker.size()) {
-				// Try to parse translated name
-				std::string_view speaker = llama_out;
-				if (auto pos = speaker.find_first_not_of(" ") + 1)
-					speaker.remove_prefix(pos - 1);
-				speaker = speaker.substr(0, speaker.find_first_of(':') + 1);
-				if (speaker.empty() || speaker.find_first_of('"') + 1) {
-					std::cerr << "Failed to parse speaker translation for: " << spker << std::endl;
-					g_speakers[spker] = ":";
-				} else {
-					g_speakers[spker] = speaker;
-				}
-			}
-			REPLACE(llama_out, "\r", "");
-			REPLACE(llama_out, "\n\n", "\n"); // Clear empty lines (although should be unnecessary)
-			cache << llama_out;
-			llama_out.clear();
-			const auto stamp = std::chrono::steady_clock::now();
-			const auto elaps = std::chrono::duration_cast<std::chrono::milliseconds>(stamp - _now);
-			std::cerr << "\rTranslated lines: " << i << "/" << nlines << "... (" << elaps.count() / i / 1000. << "s/line)    " << std::flush;
+			const auto elaps = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - _now);
+			std::cerr << std::endl << "Elapsed: " << elaps.count() << "s" << std::endl;
 		}
-		cache << std::flush;
-		cache.close();
-		update_names(names_path);
-		fs::rename(cache_path + ".tmp", cache_path);
+
+		if (g_stop)
+			std::cerr << "Aborted by user." << std::endl;
 		const auto elaps = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - g_now);
-		std::cerr << std::endl << "Elapsed: " << elaps.count() << "s" << std::endl;
-		kill(pid, SIGTERM);
-		waitpid(pid, nullptr, 0);
+		std::cerr << "Cache generation completed. Elapsed: ";
+		std::cerr << (elaps.count() / 36) / 100. << " hours (" << elaps.count() << "s)" << std::endl;
 		return 0;
-	} else {
-		std::cout << llama_out << std::flush;
-		llama_out.clear();
 	}
-
-	std::cerr << "Waiting for input..." << std::endl;
-
-	// Hint for text search (predicted entry, 0 is "impossible" default which points to pad entry)
-	size_t next_id = 1, prev_id = 0;
 
 	// Exact match mode:
 	// When line is found and is expected, it's printed out (back_buf remains empty).
@@ -561,32 +577,76 @@ int main(int argc, char* argv[])
 	// When line is found but not unique, it's added to the back buffer.
 	// Previous non-unique lines are printed if they exactly precede unique line, otherwise wiped.
 	std::vector<std::string> back_buf;
-	while (std::getline(std::cin, line)) {
-		// TODO: filter duplicates
-		if (line.size() && g_text[next_id].second.find(line) + 1) {
-			// Partial match of predicted next line
-			line = g_text[next_id].second;
+	while (!g_stop && is_piped && std::getline(std::cin, line)) {
+		if (g_mode == op_mode::rt_llama) {
+			if (line.empty()) {
+				// Process rewrite request
+				for (auto& id : id_queue) {
+					g_lines[id].seed++;
+				}
+				if (!flush_id_queue(true))
+					return 1;
+				continue;
+			}
+
+			if (line == "\x12") {
+				// Process reload request (^R)
+				reload_names();
+				reload_prompt();
+				for (auto& seg : g_lines.segs) {
+					if (!seg.lines[0].tr_text.empty()) {
+						if (!load_translation(&seg - g_lines.segs.data(), seg.cache_name)) {
+							throw std::runtime_error("Broken cache " + seg.cache_name);
+						}
+					}
+				}
+
+				if (!translate(params, c_bad_id))
+					return 1;
+				std::cerr << "Cache reloaded." << std::endl << std::flush;
+				if (!flush_id_queue(false))
+					return 1;
+				continue;
+			}
+
+			if (line == "\x13") {
+				// Process save request (^S)
+				update_names(names_path);
+				if (prev_id != c_bad_id && update_segment(params.prompt, prev_id.first)) {
+					std::cerr << "Wrote file: " << g_lines.segs[prev_id.first].cache_name << std::endl;
+				}
+				continue;
+			}
 		}
-		const auto it = g_loc.find(line);
-		if (line.empty() || it == g_loc.end()) {
+
+		// TODO: filter duplicates (currently filtered by xclipmonitor)
+		if (line.size() && next_id != c_bad_id && g_lines[next_id].text.find(line) + 1) {
+			// Partial match of predicted next line
+			line = g_lines[next_id].text;
+		}
+		const auto it = g_strings.find(line);
+		if (line.empty() || it == g_strings.end()) {
 			// Line not found (garbage?)
 			//std::cerr << "Ignored line: " << line << std::endl;
 			continue;
 		}
-		size_t last_id = next_id;
-		if (g_text[next_id].second != line) {
+		if (g_mode == op_mode::rt_llama) {
+			id_queue.clear();
+		}
+		line_id last_id = next_id;
+		if (last_id == c_bad_id || g_lines[last_id].text != line) {
 			// Handle unexpected line:
-			if (it->second == 0) {
+			if (it->second == c_bad_id) {
 				// Remember ambiguous line
 				back_buf.emplace_back(std::move(line));
-				next_id = 0;
+				next_id = c_bad_id;
 				continue;
 			}
 
 			if (it->second == prev_id) {
 				// Avoid repeating previous line
 				back_buf.clear();
-				next_id = prev_id + 1;
+				next_id = g_lines.next(prev_id);
 				continue;
 			}
 
@@ -597,9 +657,14 @@ int main(int argc, char* argv[])
 			for (auto itr = back_buf.rbegin(); itr != back_buf.rend(); itr++) {
 				bool found = false;
 				// Compensate for repetition suppression
-				while (g_text[next_id - 1].second == *itr) {
-					found = true;
-					next_id--;
+				while (next_id.second) {
+					next_id.second--;
+					if (g_lines[next_id].text == *itr) {
+						found = true;
+					} else {
+						next_id.second++;
+						break;
+					}
 				}
 				if (!found)
 					break;
@@ -608,60 +673,39 @@ int main(int argc, char* argv[])
 			back_buf.clear();
 		}
 
-		// Print line(s)
+		// Enqueue lines
 		while (next_id <= last_id) {
-			static const bool tty_out = !!isatty(STDOUT_FILENO);
-			if (g_mode == op_mode::print_only) {
-				print_line(next_id);
-			} else if (g_mode == op_mode::rt_llama) {
-				print_line(next_id, ipipe_fd[1], &llama_out, example);
-				example = ""; // Only inject example before first line
-				std::cout << llama_out << std::flush;
-				llama_out.clear();
-				if (!read_translated())
-					return 1;
-				std::cout << llama_out << std::flush;
-				llama_out.clear();
-			} else if (g_mode == op_mode::rt_cached) {
-				if (g_cache[next_id].empty()) {
-					std::cerr << "Error: Translation cache is incomplete" << std::endl;
-				} else {
-					auto& str = g_cache[next_id];
-					if (tty_out) {
-						llama_out = str;
-						if (!llama_out.starts_with(iprefix)) {
-							std::cerr << iprefix << " not found in translation cache." << std::endl;
-							return 1;
-						}
-						llama_out.replace(0, iprefix.size(), "\033[0;33m");
-						static const auto real_isuffix = "\n" + isuffix + (isuffix.ends_with(" ") ? "" : " ");
-						const auto suff_pos = llama_out.find(real_isuffix);
-						if (suff_pos + 1 == 0) {
-							std::cerr << isuffix << " not found in translation cache." << std::endl;
-							return 1;
-						}
-						llama_out.replace(suff_pos + 1, real_isuffix.size() - 1, "\033[0;1m");
-						std::cout << llama_out << "\033[0m" << std::flush;
-					} else {
-						std::cout << str << std::flush;
-					}
-				}
-			}
-
-			prev_id = next_id++;
+			id_queue.push_back(next_id);
+			prev_id = next_id;
+			if (!g_lines.advance(next_id))
+				break;
 
 			// Auto-continuation of repeated lines (compensate for repetition suppression)
-			if (next_id > last_id && g_text[next_id].second == g_text[prev_id].second) {
-				last_id++;
+			if (next_id > last_id && g_lines[next_id].text == g_lines[prev_id].text) {
+				g_lines.advance(last_id);
 				continue;
 			}
 
 			// List choices that are supposed to appear on the screen
-			if (next_id > last_id && g_text[next_id].first.starts_with("選択肢#")) {
-				last_id++;
+			if (next_id > last_id && g_lines[next_id].name.starts_with("選択肢#")) {
+				g_lines.advance(last_id);
 				continue;
 			}
 		}
+
+		if (!flush_id_queue())
+			return 1;
 	}
+
+	if (g_stop)
+		std::cerr << "Terminated by user." << std::endl;
+
+	if (g_mode == op_mode::rt_llama) {
+		// Flush (save pending translations)
+		update_names(names_path);
+		if (!translate(params, c_bad_id))
+			return 1;
+	}
+
 	return 0;
 }

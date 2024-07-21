@@ -1,4 +1,5 @@
 config/*
+build/*
 .vscode/*
 vnsleuth
 *.o
