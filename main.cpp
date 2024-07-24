@@ -154,6 +154,8 @@ void update_names(const std::string& path)
 		}
 		names.close();
 		fs::rename(path_tmp, path);
+		// Workaround to make cache files always appear as last modified
+		fs::last_write_time(path, fs::last_write_time(path) - 1s);
 	} else {
 		std::cerr << "Failed to open: " << path << ".tmp" << std::endl;
 	}

@@ -130,6 +130,23 @@ int main(int argc, char* argv[])
 					c -= 'a';
 					c += 1;
 				}
+				if (c == '\05' && argc > 1) {
+					// Send ^S save request (unreliable)
+					putchar('\x13');
+					putchar('\n');
+					fflush(stdout);
+					usleep(500'000);
+					// Execute bash script ("edit" request ^E)
+					pid_t pid = fork();
+					if (pid == 0) {
+						// Execute child process
+						execvp(argv[1], const_cast<char**>(argv + 1));
+						perror("execvp failed for argv[1]");
+						return 1;
+					}
+					waitpid(pid, nullptr, 0);
+					c = '\x12'; // ^R - reload request
+				}
 				if (c > 0 && c < 32) {
 					putchar(c);
 					if (c != '\n')

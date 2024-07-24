@@ -1,0 +1,3 @@
+#!/bin/bash
+FILE=$(find "$1/" -type f -printf "%T@ %p\n" | sort -n | cut -d' ' -f 2- | tail -n 1)
+gedit -w "$FILE" +999999999 &> /dev/null
