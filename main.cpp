@@ -202,6 +202,7 @@ uint load_translation(uint seg, const std::string& path)
 				text += temp;
 				text += '\n';
 				g_lines[id].tr_text = std::move(text);
+				g_lines[id].seed = 0;
 				g_lines.advance(id);
 			} else {
 				break;
@@ -212,6 +213,7 @@ uint load_translation(uint seg, const std::string& path)
 	// Clear remaining lines
 	for (auto id2 = id; id2 != c_bad_id; g_lines.advance(id2)) {
 		g_lines[id2].tr_text = {};
+		g_lines[id2].seed = 0;
 	}
 
 	return id.second;
@@ -433,7 +435,6 @@ int main(int argc, char* argv[])
 	params.n_gpu_layers = 999;
 	params.seed = 0;
 	params.n_ctx = 4096;
-	params.n_batch = 4096;
 	params.n_predict = 128;
 	params.sparams.temp = 0.2;
 	params.sparams.top_p = 0.3;
@@ -463,7 +464,8 @@ int main(int argc, char* argv[])
 			return 1;
 		}
 
-		// Initialize with dummy id
+		// Initialize llama.cpp
+		params.n_batch = params.n_ctx;
 		if (!translate(params, c_bad_id))
 			return 1;
 	}

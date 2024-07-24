@@ -66,7 +66,6 @@ bool translate(gpt_params& params, line_id id)
 				throw std::runtime_error("llama_kv_cache_seq_rm 1");
 			llama_kv_cache_seq_add(ctx, 0, p1, decoded, 0u - count);
 			llama_kv_cache_defrag(ctx);
-			llama_kv_cache_update(ctx);
 			decoded -= count;
 			if (decoded > 0u + params.n_ctx)
 				throw std::out_of_range("ctx underflow");
@@ -122,11 +121,14 @@ bool translate(gpt_params& params, line_id id)
 	};
 
 	// Tokenize line and add to the tokens
-	auto push_line = [&](const std::string& text) -> void {
+	auto push_line = [&](const std::string& text) -> uint {
+		uint r = 0;
 		for (auto& t : llama_tokenize(model, text, false)) {
 			tokens.push_back(t);
 			chunks.back()++;
+			r++;
 		}
+		return r;
 	};
 
 	auto init_segment = [&]() -> void {
@@ -162,7 +164,10 @@ bool translate(gpt_params& params, line_id id)
 				break;
 			to_eject++;
 			g_lines[nid].tr_text = {};
+			if (nid > id)
+				g_lines[nid].seed = 0;
 		}
+		// TODO: more accurate computation with accounting for context size
 		if (to_eject >= 10) {
 			// Full reset
 			init_segment();
@@ -181,6 +186,7 @@ bool translate(gpt_params& params, line_id id)
 		std::string llama_out;
 		const auto spker = print_line(pid, &llama_out);
 		chunks.emplace_back();
+		uint dummy_size = 0;
 		if (auto seed = g_lines[pid].seed) {
 			// Add dummy tokens to alter the output
 			// Because simply changing seed almost never changes the output (because of low temp?)
@@ -195,7 +201,7 @@ bool translate(gpt_params& params, line_id id)
 				dummy += ' ';
 			dummy += std::to_string(seed);
 			dummy += '\n';
-			push_line(dummy);
+			dummy_size = push_line(dummy);
 		}
 		push_line(llama_out);
 
@@ -239,9 +245,9 @@ bool translate(gpt_params& params, line_id id)
 			auto stamp1 = std::chrono::steady_clock::now();
 			sample_count++;
 			sample_time += stamp1 - stamp0;
-			tokens.push_back(token_id);
 			if (++pred_count > params.n_predict)
 				token_id = llama_token_nl(model); // Force newline if size exceeded
+			tokens.push_back(token_id);
 
 			// TODO: support grammar
 			llama_sampling_accept(sctx, ctx, token_id, false);
