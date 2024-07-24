@@ -1,6 +1,7 @@
 #include "common.h"
 #include "llama.h"
 #include "main.hpp"
+#include <chrono>
 #include <deque>
 
 extern volatile bool g_stop;
@@ -45,6 +46,12 @@ bool translate(gpt_params& params, line_id id)
 		return false;
 	}
 
+	static std::size_t sample_count = 0;
+	static auto sample_time = 0ns;
+	static std::size_t batch_count = 0;
+	static auto batch_time = 0ns;
+	static auto eval_time = 0ns;
+
 	// Remove first message block (returns number of tokens to erase)
 	auto eject_first = [&]() -> uint {
 		if (chunks.empty()) {
@@ -73,6 +80,16 @@ bool translate(gpt_params& params, line_id id)
 	auto eject_bunch = [&](uint i) {
 		if (i >= chunks.size()) {
 			// Remove all
+			if (decoded) {
+				// Print some statistics
+				std::cerr << "Sample speed: ";
+				std::cerr << uint(10 / (sample_time.count() / sample_count / 1e9)) / 10. << "/s" << std::endl;
+				std::cerr << "Batch speed: ";
+				std::cerr << uint(10 / (batch_time.count() / batch_count / 1e9)) / 10. << "/s (" << batch_count << " total)" << std::endl;
+				std::cerr << "Eval speed: ";
+				std::cerr << uint(10 / (eval_time.count() / sample_count / 1e9)) / 10. << "/s (" << sample_count << " total)" << std::endl;
+			}
+
 			chunks.clear();
 			tokens.clear();
 			decoded = 0;
@@ -196,25 +213,40 @@ bool translate(gpt_params& params, line_id id)
 		tokens.erase(tokens.begin() + params.n_keep, tokens.begin() + (params.n_keep + count));
 
 		// Decode pending tokens if necessary (TODO: split by batch size)
-		if (decoded < tokens.size()) {
-			llama_decode(ctx, llama_batch_get_one(&tokens[decoded], tokens.size() - decoded, decoded, 0));
+		if (auto bsize = tokens.size() - decoded) {
+			auto stamp0 = std::chrono::steady_clock::now();
+			llama_decode(ctx, llama_batch_get_one(&tokens[decoded], bsize, decoded, 0));
+			llama_synchronize(ctx);
+			auto stamp1 = std::chrono::steady_clock::now();
+			batch_count += bsize;
+			batch_time += stamp1 - stamp0;
 			decoded = tokens.size();
 		}
 
-		params.sparams.seed = g_lines[pid].seed;
-		const auto ctx_sampling = llama_sampling_init(params.sparams);
+		static const auto sctx = [&]() {
+			static const auto sctx = llama_sampling_init(params.sparams);
+			atexit([]() { llama_sampling_free(sctx); });
+			return sctx;
+		}();
+		llama_sampling_reset(sctx);
+		llama_sampling_set_rng_seed(sctx, g_lines[pid].seed);
 		static const auto real_isuffix = "\n" + isuffix;
 		int pred_count = 0;
 		while (!g_stop && !llama_out.ends_with("\n")) {
 			// Predict next token
-			auto token_id = llama_sampling_sample(ctx_sampling, ctx, nullptr);
+			auto stamp0 = std::chrono::steady_clock::now();
+			auto token_id = llama_sampling_sample(sctx, ctx, nullptr);
+			auto stamp1 = std::chrono::steady_clock::now();
+			sample_count++;
+			sample_time += stamp1 - stamp0;
 			tokens.push_back(token_id);
 			if (++pred_count > params.n_predict)
 				token_id = llama_token_nl(model); // Force newline if size exceeded
 
 			// TODO: support grammar
-			llama_sampling_accept(ctx_sampling, ctx, token_id, false);
+			llama_sampling_accept(sctx, ctx, token_id, false);
 			auto token_str = llama_token_to_piece(ctx, token_id, true);
+
 			auto trim = llama_out.ends_with(real_isuffix);
 			llama_out += token_str;
 			if (g_mode == op_mode::rt_llama) {
@@ -222,10 +254,15 @@ bool translate(gpt_params& params, line_id id)
 					token_str.erase(0, 1);
 				std::cout << token_str << std::flush; // Stream to terminal
 			}
+
+			stamp0 = std::chrono::steady_clock::now();
 			if (auto result = llama_decode(ctx, llama_batch_get_one(&tokens[decoded], 1, decoded, 0))) {
 				std::cerr << "llama_decode failed: " << result << std::endl;
 				return false;
 			}
+			llama_synchronize(ctx);
+			stamp1 = std::chrono::steady_clock::now();
+			eval_time += stamp1 - stamp0;
 			decoded++;
 			if (chunks.empty())
 				throw std::out_of_range("chunks.empty()");
@@ -237,7 +274,6 @@ bool translate(gpt_params& params, line_id id)
 			std::cout << std::endl; // Stop current line
 		if (g_mode == op_mode::rt_llama)
 			std::cout << "\033[0m" << std::flush; // Reset terminal colors
-		llama_sampling_free(ctx_sampling);
 		if (g_stop)
 			return true;
 
