@@ -121,10 +121,6 @@ int main(int argc, char* argv[])
 		if (poll(&ifd, 1, 0) > 0) {
 			char c{};
 			if (read(STDIN_FILENO, &c, 1) == 1) {
-				if (c == '\03') {
-					// Stop on Ctrl+C
-					break;
-				}
 				if (c >= 'a' && c <= 'z') {
 					// Convert lowercase letters
 					c -= 'a';
@@ -152,6 +148,11 @@ int main(int argc, char* argv[])
 					if (c != '\n')
 						putchar('\n');
 					fflush(stdout);
+				}
+				if (c == '\03') {
+					// Stop on Ctrl+C
+					usleep(300'000);
+					break;
 				}
 			} else {
 				perror("Reading from stdin failed");

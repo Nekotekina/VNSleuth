@@ -2,7 +2,9 @@
 
 #include <cstdint>
 #include <map>
+#include <mutex>
 #include <set>
+#include <shared_mutex>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -64,18 +66,6 @@ inline struct loaded_lines {
 		return segs.at(id.first).lines.at(id.second);
 	}
 
-	line_id last() const noexcept
-	{
-		if (segs.empty())
-			return c_bad_id;
-		if (segs.back().lines.empty())
-			return c_bad_id;
-		line_id r{};
-		r.first = segs.size() - 1;
-		r.second = segs.back().lines.size() - 1;
-		return r;
-	}
-
 	// Get next line id
 	line_id next(line_id id) const noexcept
 	{
@@ -120,6 +110,16 @@ inline struct loaded_lines {
 			return false;
 		return true;
 	}
+
+	// Check id is valid and last in the segment
+	bool is_last(line_id id) const noexcept
+	{
+		if (id.first >= segs.size())
+			return false;
+		if (id.second + 1 && id.second == segs[id.first].lines.size() - 1)
+			return true;
+		return false;
+	}
 } g_lines;
 
 // String database (string -> line_id) which owns strings.
@@ -131,5 +131,18 @@ inline std::set<std::pair<std::string, std::string>> g_furigana;
 // Speaker database (name -> translation)
 inline std::map<std::string, std::string, std::less<>> g_speakers{{"？？？:", "???:"}};
 
+// Global mutex
+inline std::shared_mutex g_mutex;
+
 // Parse script into global variables; return number of lines parsed
 uint parse(std::string_view data);
+
+// translate() control
+enum class tr_cmd {
+	translate, // Main op
+	kick,	   // Start background worker
+	sync,	   // Terminate background translation
+};
+
+// Obvious.
+bool translate(struct gpt_params& params, line_id id, tr_cmd cmd = tr_cmd::translate);

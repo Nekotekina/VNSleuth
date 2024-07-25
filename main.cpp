@@ -12,6 +12,7 @@
 #include <fstream>
 #include <iostream>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -50,7 +51,7 @@ std::string example = "JP: この物語はフィクションです。\n"
 					  "En: This story is a work of fiction.\n";
 
 // Print line, return original speaker name if first encountered
-std::string print_line(line_id id, std::string* line = nullptr)
+std::string print_line(line_id id, std::string* line = nullptr, bool stream = false)
 {
 	// Reduce token count and also fix potential issues with borked translations
 	std::string out;
@@ -98,6 +99,8 @@ std::string print_line(line_id id, std::string* line = nullptr)
 		speaker += result.substr("選択肢#"sv.size());
 	} else if (!result.empty()) {
 		// Find registered speaker translation
+		std::lock_guard lock(g_mutex);
+
 		const auto& found = g_speakers.at(result);
 		if (found.empty()) {
 			ret = true;
@@ -121,14 +124,14 @@ std::string print_line(line_id id, std::string* line = nullptr)
 		line->append("\n");
 		line->append(isuffix);
 		line->append(speaker);
+	}
 
-		if (g_mode == op_mode::rt_llama) {
-			// Print colored output without prefixes
-			if (speaker.starts_with(" "))
-				speaker.erase(0, 1);
-			std::cout << "\033[0;33m" << result << out << std::endl;
-			std::cout << "\033[0;1m" << speaker << std::flush;
-		}
+	if (stream) {
+		// Print colored output without prefixes
+		if (speaker.starts_with(" "))
+			speaker.erase(0, 1);
+		std::cout << "\033[0;33m" << result << out << std::endl;
+		std::cout << "\033[0;1m" << speaker << std::flush;
 	}
 
 	if (ret) {
@@ -138,6 +141,8 @@ std::string print_line(line_id id, std::string* line = nullptr)
 }
 
 namespace fs = std::filesystem;
+
+static std::string names_path;
 
 void update_names(const std::string& path)
 {
@@ -163,6 +168,10 @@ void update_names(const std::string& path)
 
 bool update_segment(std::string_view prompt, uint seg)
 {
+	std::lock_guard lock(g_mutex);
+
+	update_names(names_path);
+
 	std::string dump = "SRC:";
 	dump += g_lines.segs[seg].src_name;
 	dump += "\n";
@@ -219,8 +228,6 @@ uint load_translation(uint seg, const std::string& path)
 	return id.second;
 }
 
-extern bool translate(gpt_params& params, line_id id);
-
 void sigh(int) { g_stop = true; }
 
 int main(int argc, char* argv[])
@@ -256,7 +263,7 @@ int main(int argc, char* argv[])
 	const auto g_now = std::chrono::steady_clock::now();
 
 	// Parse scripts in a given directory
-	std::string line, cache_path, prompt_path, names_path, replaces_path;
+	std::string line, cache_path, prompt_path;
 	bool is_incomplete = false;
 
 	// Load file list recursively
@@ -322,6 +329,8 @@ int main(int argc, char* argv[])
 
 	auto reload_names = [&] {
 		// Load (pre-translated) names
+		std::lock_guard lock(g_mutex);
+
 		std::ifstream names(names_path);
 		if (names.is_open()) {
 			g_speakers.clear();
@@ -386,7 +395,7 @@ int main(int argc, char* argv[])
 					}
 					if (fs::is_regular_file(cache_path)) {
 						const auto tr_lines = load_translation(i, cache_path);
-						if (g_lines[g_lines.last()].tr_text.empty() && g_mode == op_mode::print_info)
+						if (tr_lines < g_lines.segs.at(i).lines.size() && g_mode == op_mode::print_info)
 							std::cerr << " (partial)" << std::endl;
 						else if (g_mode == op_mode::print_info)
 							std::cerr << (tr_lines ? " (exists)" : " (empty!)") << std::endl;
@@ -442,6 +451,8 @@ int main(int argc, char* argv[])
 	params.sparams.penalty_repeat = 1.1;
 	auto reload_prompt = [&]() {
 		// Load prompt
+		std::lock_guard lock(g_mutex);
+
 		std::ifstream p(prompt_path);
 		if (p.is_open()) {
 			params.prompt = {};
@@ -496,6 +507,7 @@ int main(int argc, char* argv[])
 			return true;
 		}
 
+		bool is_kicked = false;
 		for (auto& id : id_queue) {
 			if (g_mode != op_mode::make_cache && id.second == 0 && !rewrite) {
 				std::cerr << "Starting new segment..." << std::endl << std::flush;
@@ -505,6 +517,7 @@ int main(int argc, char* argv[])
 					return false;
 				continue;
 			}
+			std::unique_lock lock(g_mutex);
 			auto& line = g_lines[id];
 			if (!line.tr_text.empty()) {
 				if (g_mode == op_mode::make_cache)
@@ -523,10 +536,23 @@ int main(int argc, char* argv[])
 				}
 				out.replace(suff_pos + 1, real_isuffix.size() - 1, "\033[0;1m");
 				std::cout << out << "\033[0m" << std::flush;
+				lock.unlock();
+
+				if (g_mode == op_mode::rt_llama && !is_kicked) {
+					is_kicked = true;
+					if (!translate(params, id, tr_cmd::kick))
+						return false;
+				}
+				if (g_mode == op_mode::rt_llama && g_lines.is_last(id)) {
+					// Prepare to autosave segment on last id
+					if (!translate(params, line_id{id.first, 0u - 1}, tr_cmd::sync))
+						return false;
+				}
 			} else if (g_mode == op_mode::rt_cached) {
 				std::cerr << "Error: Translation cache is incomplete" << std::endl;
 				break;
 			} else {
+				lock.unlock();
 				if (!translate(params, id))
 					return false;
 			}
@@ -560,7 +586,6 @@ int main(int argc, char* argv[])
 				if (g_stop)
 					break;
 			}
-			update_names(names_path);
 			if (!translate(params, c_bad_id))
 				return 1;
 			const auto elaps = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - _now);
@@ -593,11 +618,21 @@ int main(int argc, char* argv[])
 				continue;
 			}
 
+			if (line == "\03") {
+				// Process terminate request (^C)
+				g_stop = true;
+				break;
+			}
+
 			if (line == "\x12") {
 				// Process reload request (^R)
+				if (!translate(params, {0, 0}, tr_cmd::sync))
+					return 1;
 				reload_names();
 				reload_prompt();
 				for (auto& seg : g_lines.segs) {
+					std::lock_guard lock{g_mutex};
+
 					if (!seg.lines[0].tr_text.empty()) {
 						if (!load_translation(&seg - g_lines.segs.data(), seg.cache_name)) {
 							throw std::runtime_error("Broken cache " + seg.cache_name);
@@ -614,8 +649,9 @@ int main(int argc, char* argv[])
 			}
 
 			if (line == "\x13") {
-				// Process save request (^S)
-				update_names(names_path);
+				// Process stop-and-save request (^S)
+				if (!translate(params, next_id, tr_cmd::sync))
+					return 1;
 				if (prev_id != c_bad_id && update_segment(params.prompt, prev_id.first)) {
 					std::cerr << "Wrote file: " << g_lines.segs[prev_id.first].cache_name << std::endl;
 				}
@@ -706,8 +742,9 @@ int main(int argc, char* argv[])
 
 	if (g_mode == op_mode::rt_llama) {
 		// Flush (save pending translations)
-		update_names(names_path);
-		if (!translate(params, c_bad_id))
+		if (!translate(params, next_id, tr_cmd::sync))
+			return 1;
+		if (prev_id != c_bad_id && !update_segment(params.prompt, prev_id.first))
 			return 1;
 	}
 
