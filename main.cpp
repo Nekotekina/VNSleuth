@@ -192,7 +192,7 @@ bool update_segment(std::string_view prompt, uint seg)
 	return true;
 }
 
-uint load_translation(uint seg, const std::string& path)
+std::pair<uint, uint> load_translation(uint seg, const std::string& path)
 {
 	std::ifstream cache(path);
 	if (!cache.is_open())
@@ -201,6 +201,8 @@ uint load_translation(uint seg, const std::string& path)
 	// Extract cached translation
 	line_id id{seg, 0};
 	std::string temp;
+	uint kept = 0;
+	bool keep = true;
 	while (std::getline(cache, temp, '\n')) {
 		// Skip prompt+example (example isn't stored anymore, it's an artifact)
 		if (temp.starts_with(iprefix) && !temp.ends_with("\\")) {
@@ -210,8 +212,14 @@ uint load_translation(uint seg, const std::string& path)
 				text += '\n';
 				text += temp;
 				text += '\n';
+				auto old = std::move(g_lines[id].tr_text);
 				g_lines[id].tr_text = std::move(text);
-				g_lines[id].seed = 0;
+				if (keep && g_lines[id].tr_text == old) {
+					kept++;
+				} else {
+					g_lines[id].seed = 0;
+					keep = false;
+				}
 				g_lines.advance(id);
 			} else {
 				break;
@@ -225,7 +233,7 @@ uint load_translation(uint seg, const std::string& path)
 		g_lines[id2].seed = 0;
 	}
 
-	return id.second;
+	return std::make_pair(id.second, kept);
 }
 
 void sigh(int) { g_stop = true; }
@@ -394,7 +402,7 @@ int main(int argc, char* argv[])
 						std::cerr << "Cache file: " << cache_path;
 					}
 					if (fs::is_regular_file(cache_path)) {
-						const auto tr_lines = load_translation(i, cache_path);
+						const auto tr_lines = load_translation(i, cache_path).first;
 						if (tr_lines < g_lines.segs.at(i).lines.size() && g_mode == op_mode::print_info)
 							std::cerr << " (partial)" << std::endl;
 						else if (g_mode == op_mode::print_info)
@@ -449,9 +457,9 @@ int main(int argc, char* argv[])
 	params.sparams.top_p = 0.3;
 	params.sparams.penalty_last_n = 3;
 	params.sparams.penalty_repeat = 1.1;
-	auto reload_prompt = [&]() {
+	auto reload_prompt = [&]() -> bool {
 		// Load prompt
-		std::lock_guard lock(g_mutex);
+		const auto old_prompt = std::move(params.prompt);
 
 		std::ifstream p(prompt_path);
 		if (p.is_open()) {
@@ -466,7 +474,11 @@ int main(int argc, char* argv[])
 				params.prompt += '\n';
 		} else {
 			std::cerr << "Failed to load prompt: " << prompt_path << std::endl;
+			return true;
 		}
+
+		// Check if the prompt has been modified
+		return params.prompt != old_prompt;
 	};
 	reload_prompt();
 	if (argc > 2) {
@@ -477,6 +489,7 @@ int main(int argc, char* argv[])
 
 		// Initialize llama.cpp
 		params.n_batch = params.n_ctx;
+		std::cerr << "Processing prompt..." << std::endl;
 		if (!translate(params, c_bad_id))
 			return 1;
 	}
@@ -629,20 +642,41 @@ int main(int argc, char* argv[])
 				if (!translate(params, {0, 0}, tr_cmd::sync))
 					return 1;
 				reload_names();
-				reload_prompt();
+				bool full_reload = reload_prompt();
+				uint kept_lines = 0;
 				for (auto& seg : g_lines.segs) {
 					std::lock_guard lock{g_mutex};
-
+					const uint segment = &seg - g_lines.segs.data();
 					if (!seg.lines[0].tr_text.empty()) {
-						if (!load_translation(&seg - g_lines.segs.data(), seg.cache_name)) {
+						auto [loaded, kept] = load_translation(segment, seg.cache_name);
+						if (!loaded) {
 							throw std::runtime_error("Broken cache " + seg.cache_name);
+						}
+						if (segment == next_id.first) {
+							kept_lines = kept;
 						}
 					}
 				}
 
-				if (!translate(params, c_bad_id))
-					return 1;
-				std::cerr << "Cache reloaded." << std::endl << std::flush;
+				if (!kept_lines)
+					full_reload = true;
+
+				if (full_reload) {
+					std::cerr << "Reloading cache..." << std::endl;
+					if (!translate(params, c_bad_id, tr_cmd::reload))
+						return 1;
+					std::cerr << "Cache reloaded." << std::endl << std::flush;
+				} else {
+					// Optimized reload
+					const uint to_eject = next_id.second - kept_lines;
+					if (params.verbosity)
+						std::fprintf(stderr, "\033[0m[] Reload: eject %u, keep %u\n", to_eject, kept_lines);
+					if (!translate(params, {0u, to_eject}, tr_cmd::eject))
+						return 1;
+					if (!translate(params, {next_id.first, kept_lines}, tr_cmd::reload))
+						return 1;
+				}
+
 				if (!flush_id_queue(false))
 					return 1;
 				continue;

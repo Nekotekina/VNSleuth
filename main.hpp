@@ -139,9 +139,11 @@ uint parse(std::string_view data);
 
 // translate() control
 enum class tr_cmd {
-	translate, // Main op
+	translate, // Translate line in foreground
 	kick,	   // Start background worker
-	sync,	   // Terminate background translation
+	sync,	   // Terminate background worker
+	eject,	   // Eject id.second last lines
+	reload,	   // Reload starting from id
 };
 
 // Obvious.

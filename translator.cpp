@@ -193,10 +193,23 @@ bool translate(gpt_params& params, line_id id, tr_cmd cmd)
 		return r;
 	};
 
+	auto decode = [&]() -> void {
+		// (TODO: split by batch size?)
+		if (auto bsize = tokens.size() - decoded) {
+			auto stamp0 = std::chrono::steady_clock::now();
+			llama_decode(ctx, llama_batch_get_one(&tokens[decoded], bsize, decoded, 0));
+			llama_synchronize(ctx);
+			auto stamp1 = std::chrono::steady_clock::now();
+			batch_count += bsize;
+			batch_time += stamp1 - stamp0;
+			decoded = tokens.size();
+		}
+	};
+
 	auto init_segment = [&]() -> void {
 		// Initialize segment: eject all first
 		eject_bunch(-1);
-		segment = id.first;
+		decode();
 		if (segment + 1) {
 			std::lock_guard lock(g_mutex);
 
@@ -209,6 +222,35 @@ bool translate(gpt_params& params, line_id id, tr_cmd cmd)
 		}
 	};
 
+	if (cmd == tr_cmd::eject) {
+		eject_bunch(id.second);
+		return true;
+	}
+
+	if (cmd == tr_cmd::reload) {
+		if (id == c_bad_id) {
+			// Full reload
+			init_segment();
+			return true;
+		}
+		if (id.first != segment) {
+			segment = id.first;
+			init_segment();
+		}
+		if (segment + 1) {
+			std::lock_guard lock(g_mutex);
+
+			for (line_id nid{segment, id.second}; nid != c_bad_id; g_lines.advance(nid)) {
+				if (g_lines[nid].tr_text.empty())
+					break;
+				chunks.emplace_back();
+				push_line(g_lines[nid].tr_text);
+			}
+		}
+		decode();
+		return true;
+	}
+
 	if (id.first != segment) {
 		// Update previous translation file
 		if (segment + 1) {
@@ -216,6 +258,7 @@ bool translate(gpt_params& params, line_id id, tr_cmd cmd)
 		}
 
 		// Initialize new segment
+		segment = id.first;
 		init_segment();
 	}
 
@@ -293,16 +336,8 @@ bool translate(gpt_params& params, line_id id, tr_cmd cmd)
 		if (std::this_thread::get_id() == s_main_tid && !eject_start())
 			return false;
 
-		// Decode pending tokens if necessary (TODO: split by batch size)
-		if (auto bsize = tokens.size() - decoded) {
-			auto stamp0 = std::chrono::steady_clock::now();
-			llama_decode(ctx, llama_batch_get_one(&tokens[decoded], bsize, decoded, 0));
-			llama_synchronize(ctx);
-			auto stamp1 = std::chrono::steady_clock::now();
-			batch_count += bsize;
-			batch_time += stamp1 - stamp0;
-			decoded = tokens.size();
-		}
+		// Decode pending tokens if necessary
+		decode();
 
 		// Eject dummy immediately (optimization)
 		if (dummy_size) {
