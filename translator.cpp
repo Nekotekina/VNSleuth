@@ -91,7 +91,7 @@ bool translate(gpt_params& params, line_id id, tr_cmd cmd)
 				// Don't touch worker
 				return true;
 			} else if (tr_lines != rd_lines) {
-				std::fprintf(stderr, "\033[0mError: Kicked from untranslated line: %u<%u\n", tr_lines, rd_lines);
+				std::fprintf(stderr, "%sError: Kicked from untranslated line: %u<%u\n", g_esc.reset, tr_lines, rd_lines);
 			}
 		}
 
@@ -273,7 +273,7 @@ bool translate(gpt_params& params, line_id id, tr_cmd cmd)
 				break;
 			to_eject++;
 			if (params.verbosity)
-				std::fprintf(stderr, "\033[0m[id:%u:%u] Ejected\n", nid.first, nid.second);
+				std::fprintf(stderr, "%s[id:%u:%u] Ejected\n", g_esc.reset, nid.first, nid.second);
 			g_lines[nid].tr_text = {};
 			if (nid > id)
 				g_lines[nid].seed = 0;
@@ -307,7 +307,7 @@ bool translate(gpt_params& params, line_id id, tr_cmd cmd)
 		}
 
 		if (params.verbosity)
-			std::fprintf(stderr, "\033[0m[id:%u:%u, s:%u, t:%zu, last:%u, chk:%llu] Line: %s%s\n", pid.first, pid.second, seed, tokens.size(),
+			std::fprintf(stderr, "%s[id:%u:%u, s:%u, t:%zu, last:%u, chk:%llu] Line: %s%s\n", g_esc.reset, pid.first, pid.second, seed, tokens.size(),
 						 chunks.size() ? chunks.back() : -1, std::accumulate(tokens.begin(), tokens.end(), 0ull), g_lines[pid].name.c_str(),
 						 g_lines[pid].text.data());
 
@@ -400,7 +400,7 @@ bool translate(gpt_params& params, line_id id, tr_cmd cmd)
 		if (is_stopped() && !llama_out.ends_with("\n") && std::this_thread::get_id() == s_main_tid)
 			std::cout << std::endl; // Stop current line
 		if (g_mode == op_mode::rt_llama && std::this_thread::get_id() == s_main_tid)
-			std::cout << "\033[0m" << std::flush; // Reset terminal colors
+			std::cout << g_esc.reset << std::flush; // Reset terminal colors
 		if (is_stopped() && !llama_out.ends_with("\n")) {
 			// Discard incomplete work
 			eject_bunch(1);
@@ -450,7 +450,7 @@ bool translate(gpt_params& params, line_id id, tr_cmd cmd)
 			auto start = g_lines.next(id);
 			auto next = start;
 			if (params.verbosity)
-				std::fprintf(stderr, "\033[0m[id:%u:%u] Thread entry\n", next.first, next.second);
+				std::fprintf(stderr, "%s[id:%u:%u] Thread entry\n", g_esc.reset, next.first, next.second);
 			while (!is_stopped() && next != c_bad_id && translate(params, next, tr_cmd::translate)) {
 				work_res++;
 				g_lines.advance(next);
@@ -466,14 +466,14 @@ bool translate(gpt_params& params, line_id id, tr_cmd cmd)
 			while (start != c_bad_id && !g_lines[start].tr_text.empty()) {
 				if (start.second >= from) {
 					if (params.verbosity && !std::exchange(msg, true))
-						std::fprintf(stderr, "\033[0m[id:%u:%u, from:%u] Cleaning\n", start.first, start.second, from);
+						std::fprintf(stderr, "%s[id:%u:%u, from:%u] Cleaning\n", g_esc.reset, start.first, start.second, from);
 					g_lines[start].tr_text.clear();
 					eject_bunch(1); // reverse order but should work ok?
 				}
 				g_lines.advance(start);
 			}
 			if (params.verbosity)
-				std::fprintf(stderr, "\033[0m[id:%u:?] Thread exit\n", next.first);
+				std::fprintf(stderr, "%s[id:%u:?] Thread exit\n", g_esc.reset, next.first);
 		});
 	}
 

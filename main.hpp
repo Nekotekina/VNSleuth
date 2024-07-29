@@ -1,12 +1,14 @@
 #pragma once
 
 #include <cstdint>
+#include <cstring>
 #include <map>
 #include <mutex>
 #include <set>
 #include <shared_mutex>
 #include <string>
 #include <string_view>
+#include <type_traits>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -148,3 +150,17 @@ enum class tr_cmd {
 
 // Obvious.
 bool translate(struct gpt_params& params, line_id id, tr_cmd cmd = tr_cmd::translate);
+
+// Terminal colors
+inline struct escape_sequences {
+	const char reset[16] = "\033[0m";
+	const char orig[16] = "\033[0;33m"; // yellow
+	const char tran[16] = "\033[0;1m";	// bold
+
+	void disable()
+	{
+		// Clear all strings
+		static_assert(std::is_trivially_copyable_v<escape_sequences>);
+		std::memset(this, 0, sizeof(*this));
+	}
+} g_esc{};

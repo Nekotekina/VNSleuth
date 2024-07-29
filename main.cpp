@@ -130,8 +130,8 @@ std::string print_line(line_id id, std::string* line = nullptr, bool stream = fa
 		// Print colored output without prefixes
 		if (speaker.starts_with(" "))
 			speaker.erase(0, 1);
-		std::cout << "\033[0;33m" << result << out << std::endl;
-		std::cout << "\033[0;1m" << speaker << std::flush;
+		std::cout << g_esc.orig << result << out << std::endl;
+		std::cout << g_esc.tran << speaker << std::flush;
 	}
 
 	if (ret) {
@@ -487,6 +487,10 @@ int main(int argc, char* argv[])
 			return 1;
 		}
 
+		// Disable colors
+		if (!params.use_color)
+			g_esc.disable();
+
 		// Initialize llama.cpp
 		params.n_batch = params.n_ctx;
 		std::cerr << "Processing prompt..." << std::endl;
@@ -540,15 +544,15 @@ int main(int argc, char* argv[])
 					std::cerr << iprefix << " not found in translation cache." << std::endl;
 					return false;
 				}
-				out.replace(0, iprefix.size(), "\033[0;33m");
+				out.replace(0, iprefix.size(), g_esc.orig);
 				static const auto real_isuffix = "\n" + isuffix + (isuffix.ends_with(" ") ? "" : " ");
 				const auto suff_pos = out.find(real_isuffix);
 				if (suff_pos + 1 == 0) {
 					std::cerr << isuffix << " not found in translation cache." << std::endl;
 					return false;
 				}
-				out.replace(suff_pos + 1, real_isuffix.size() - 1, "\033[0;1m");
-				std::cout << out << "\033[0m" << std::flush;
+				out.replace(suff_pos + 1, real_isuffix.size() - 1, g_esc.tran);
+				std::cout << out << g_esc.reset << std::flush;
 				lock.unlock();
 
 				if (g_mode == op_mode::rt_llama && !is_kicked) {
@@ -670,7 +674,7 @@ int main(int argc, char* argv[])
 					// Optimized reload
 					const uint to_eject = next_id.second - kept_lines;
 					if (params.verbosity)
-						std::fprintf(stderr, "\033[0m[] Reload: eject %u, keep %u\n", to_eject, kept_lines);
+						std::fprintf(stderr, "%s[] Reload: eject %u, keep %u\n", g_esc.reset, to_eject, kept_lines);
 					if (!translate(params, {0u, to_eject}, tr_cmd::eject))
 						return 1;
 					if (!translate(params, {next_id.first, kept_lines}, tr_cmd::reload))
