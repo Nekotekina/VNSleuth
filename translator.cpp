@@ -368,12 +368,19 @@ bool translate(gpt_params& params, line_id id, tr_cmd cmd)
 			sample_time += stamp1 - stamp0;
 			if (++pred_count > params.n_predict)
 				token_id = llama_token_nl(model); // Force newline if size exceeded
+			auto token_str = llama_token_to_piece(ctx, token_id, true);
+			if (std::count(token_str.begin(), token_str.end(), '\n') > 0u + token_str.ends_with("\n")) {
+				// Attempt to fix the line containing incorrect newlines
+				token_str.resize(token_str.find_first_of('\n') + 1);
+				auto tks = llama_tokenize(model, token_str, false);
+				if (tks.size() == 1)
+					token_id = tks[0];
+				else
+					token_id = llama_token_nl(model);
+			}
 			tokens.push_back(token_id);
 
-			// TODO: support grammar
-			llama_sampling_accept(sctx, ctx, token_id, false);
-			auto token_str = llama_token_to_piece(ctx, token_id, true);
-
+			llama_sampling_accept(sctx, ctx, token_id, true);
 			auto trim = llama_out.ends_with(real_isuffix);
 			llama_out += token_str;
 			if (g_mode == op_mode::rt_llama && std::this_thread::get_id() == s_main_tid) {
@@ -407,7 +414,7 @@ bool translate(gpt_params& params, line_id id, tr_cmd cmd)
 			return true;
 		}
 
-		// Try to parse translated name
+		// Try to parse translated name (TODO: name should be translated in a separate loop without grammar)
 		std::lock_guard lock(g_mutex);
 
 		if (spker.size()) {
