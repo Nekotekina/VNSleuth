@@ -101,6 +101,12 @@ void add_line(int choice, std::string name, std::string text)
 	line.text = std::move(text);
 	line.sq_text = std::as_const(text_it->first);
 
+	if (id.second == 0) {
+		auto [it, ok2] = g_start_strings.emplace(text_it->first, id);
+		if (!ok2)
+			it->second = c_bad_id;
+	}
+
 	if (!line.name.empty() && !choice)
 		g_speakers.emplace(line.name, std::string());
 }

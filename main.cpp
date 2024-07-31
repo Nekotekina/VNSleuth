@@ -542,6 +542,32 @@ int main(int argc, char* argv[])
 	line_id next_id = c_bad_id;
 	line_id prev_id = c_bad_id;
 
+	// Try to guess next_id for smoother startup
+	if (g_mode == op_mode::rt_llama) {
+		for (auto& s : g_lines.segs) {
+			// Skip untranslated segments
+			if (s.lines.at(0).tr_text.empty())
+				continue;
+			// Skip fully translated segments
+			if (s.lines.back().tr_text.empty()) {
+				next_id.first = &s - g_lines.segs.data();
+				next_id.second = std::count_if(s.lines.begin(), s.lines.end(), [](line_info& line) {
+					// Count translated lines
+					return !line.tr_text.empty();
+				});
+
+				prev_id.first = next_id.first;
+				prev_id.second = next_id.second - 1;
+			}
+		}
+
+		// Also kick translator
+		if (next_id != c_bad_id) {
+			if (!translate(params, prev_id, tr_cmd::kick))
+				return false;
+		}
+	}
+
 	// List of IDs that must be processed (possibly more than once)
 	std::vector<line_id> id_queue;
 	auto flush_id_queue = [&](bool rewrite = false) -> bool {
@@ -732,13 +758,41 @@ int main(int argc, char* argv[])
 		}
 
 		std::string sq_line = squeeze_line(line);
-		if (sq_line.size() && next_id != c_bad_id && g_lines[next_id].sq_text.find(sq_line) + 1) {
-			// Partial match of predicted next line
-			sq_line = g_lines[next_id].sq_text;
+		if (sq_line.size() && next_id != c_bad_id) {
+			// Partial match of predicted next line, should be at least 1/3 of original length
+			const auto& sq = g_lines[next_id].sq_text;
+			if (sq_line.size() >= sq.size() / 3 && sq.find(sq_line) + 1) {
+				sq_line = sq;
+			}
 		}
-		const auto it = g_strings.find(sq_line);
-		if (sq_line.empty() || it == g_strings.end()) {
-			// Line not found (garbage?)
+		if (sq_line.empty()) {
+			continue;
+		}
+		auto it = g_strings.find(sq_line);
+		if (next_id == c_bad_id && (it == g_strings.end() || it->second == c_bad_id) && back_buf.empty()) {
+			// For smoother startup from an ambiguous line, attempt to show first line in a segment
+			const auto it2 = g_start_strings.find(sq_line);
+			if (it2 != g_start_strings.end()) {
+				next_id = it2->second;
+			} else {
+				for (const auto& [sq, id] : g_start_strings) {
+					// Partial match fallback
+					if (sq_line.size() >= sq.size() / 3 && sq.find(sq_line) + 1) {
+						if (next_id != c_bad_id) {
+							// Multiple matches, abort search
+							next_id = c_bad_id;
+							break;
+						}
+						next_id = id;
+					}
+				}
+				if (next_id != c_bad_id) {
+					sq_line = g_lines[next_id].sq_text;
+					it = g_strings.find(sq_line);
+				}
+			}
+		}
+		if (it == g_strings.end()) {
 			continue;
 		}
 		if (g_mode == op_mode::rt_llama) {

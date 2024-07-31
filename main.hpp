@@ -127,6 +127,9 @@ inline struct loaded_lines {
 // String database for search (squeezed string -> line_id)
 inline std::unordered_map<std::string, line_id> g_strings;
 
+// Auxiliary string search helper, only contains first lines in each segment
+inline std::unordered_map<std::string_view, line_id> g_start_strings;
+
 // Furigana database (word ; reading)
 inline std::set<std::pair<std::string, std::string>> g_furigana;
 
