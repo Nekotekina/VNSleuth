@@ -140,6 +140,41 @@ std::string print_line(line_id id, std::string* line = nullptr, bool stream = fa
 	return "";
 }
 
+std::string squeeze_line(const std::string& line)
+{
+	// For opportunistic compatibility with "bad" hooks which repeat characters, or remove repeats
+	std::string r;
+	std::string_view prev, next;
+	for (const char& c : line) {
+		next = {};
+		if ((c & 0x80) == 0) {
+			next = std::string_view(&c, 1);
+		} else if ((c & 0xe0) == 0xc0) {
+			next = std::string_view(&c, 2);
+		} else if ((c & 0xf0) == 0xe0) {
+			next = std::string_view(&c, 3);
+		} else if ((c & 0xf8) == 0xf0) {
+			next = std::string_view(&c, 4);
+		}
+		for (auto& ch : next) {
+			// Check for null terminator
+			if (ch == 0)
+				return r;
+			if (&ch > next.data() && (ch & 0xc0) != 0x80) {
+				// Invalid UTF-8 sequence
+				next = {};
+				break;
+			}
+		}
+		if (!next.empty() && next != prev) {
+			// Append non-repeating code
+			r += next;
+			prev = next;
+		}
+	}
+	return r;
+}
+
 namespace fs = std::filesystem;
 
 static std::string names_path;
@@ -617,7 +652,6 @@ int main(int argc, char* argv[])
 		return 0;
 	}
 
-	// Exact match mode:
 	// When line is found and is expected, it's printed out (back_buf remains empty).
 	// When line is found and is unique, the back buffer is flushed as well.
 	// When line is found but not unique, it's added to the back buffer.
@@ -697,26 +731,25 @@ int main(int argc, char* argv[])
 			}
 		}
 
-		// TODO: filter duplicates (currently filtered by xclipmonitor)
-		if (line.size() && next_id != c_bad_id && g_lines[next_id].text.find(line) + 1) {
+		std::string sq_line = squeeze_line(line);
+		if (sq_line.size() && next_id != c_bad_id && g_lines[next_id].sq_text.find(sq_line) + 1) {
 			// Partial match of predicted next line
-			line = g_lines[next_id].text;
+			sq_line = g_lines[next_id].sq_text;
 		}
-		const auto it = g_strings.find(line);
-		if (line.empty() || it == g_strings.end()) {
+		const auto it = g_strings.find(sq_line);
+		if (sq_line.empty() || it == g_strings.end()) {
 			// Line not found (garbage?)
-			//std::cerr << "Ignored line: " << line << std::endl;
 			continue;
 		}
 		if (g_mode == op_mode::rt_llama) {
 			id_queue.clear();
 		}
 		line_id last_id = next_id;
-		if (last_id == c_bad_id || g_lines[last_id].text != line) {
+		if (last_id == c_bad_id || g_lines[last_id].sq_text != sq_line) {
 			// Handle unexpected line:
 			if (it->second == c_bad_id) {
 				// Remember ambiguous line
-				back_buf.emplace_back(std::move(line));
+				back_buf.emplace_back(std::move(sq_line));
 				next_id = c_bad_id;
 				continue;
 			}
@@ -737,7 +770,7 @@ int main(int argc, char* argv[])
 				// Compensate for repetition suppression
 				while (next_id.second) {
 					next_id.second--;
-					if (g_lines[next_id].text == *itr) {
+					if (g_lines[next_id].sq_text == *itr) {
 						found = true;
 					} else {
 						next_id.second++;
@@ -759,7 +792,7 @@ int main(int argc, char* argv[])
 				break;
 
 			// Auto-continuation of repeated lines (compensate for repetition suppression)
-			if (next_id > last_id && g_lines[next_id].text == g_lines[prev_id].text) {
+			if (next_id > last_id && g_lines[next_id].sq_text == g_lines[prev_id].sq_text) {
 				g_lines.advance(last_id);
 				continue;
 			}

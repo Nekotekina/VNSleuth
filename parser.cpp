@@ -92,13 +92,14 @@ void add_line(int choice, std::string name, std::string text)
 	id.first = g_lines.segs.size() - 1;
 	id.second = g_lines.segs[id.first].lines.size();
 
-	auto [text_it, ok] = g_strings.emplace(std::move(text), id);
+	auto [text_it, ok] = g_strings.emplace(squeeze_line(text), id);
 	if (!ok)
 		text_it->second = c_bad_id; // Mark if not unique
 
 	line_info& line = g_lines.segs[id.first].lines.emplace_back();
 	line.name = std::move(name);
-	line.text = std::as_const(text_it->first);
+	line.text = std::move(text);
+	line.sq_text = std::as_const(text_it->first);
 
 	if (!line.name.empty() && !choice)
 		g_speakers.emplace(line.name, std::string());

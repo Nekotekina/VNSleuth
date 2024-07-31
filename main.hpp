@@ -28,10 +28,10 @@ inline enum class op_mode {
 	make_cache, // Offline cache generation
 } g_mode{};
 
-// Text line information (lines are owned by g_strings)
 struct line_info {
 	std::string name;		  // Character name (speaker), may be empty
-	std::string_view text;	  // Line text
+	std::string text;		  // Original text
+	std::string_view sq_text; // Processed text (squeezed, owned permanently by g_strings)
 	std::string tr_text;	  // Translated text (two-line format)
 	uint seed = 0;			  // Increases with each rewrite
 };
@@ -124,7 +124,7 @@ inline struct loaded_lines {
 	}
 } g_lines;
 
-// String database (string -> line_id) which owns strings.
+// String database for search (squeezed string -> line_id)
 inline std::unordered_map<std::string, line_id> g_strings;
 
 // Furigana database (word ; reading)
@@ -135,6 +135,9 @@ inline std::map<std::string, std::string, std::less<>> g_speakers{{"？？？:",
 
 // Global mutex
 inline std::shared_mutex g_mutex;
+
+// Remove all repeating characters in line
+std::string squeeze_line(const std::string& line);
 
 // Parse script into global variables; return number of lines parsed
 uint parse(std::string_view data);
