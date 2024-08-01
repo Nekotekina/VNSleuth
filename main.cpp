@@ -692,6 +692,7 @@ int main(int argc, char* argv[])
 	// When line is found but not unique, it's added to the back buffer.
 	// Previous non-unique lines are printed if they exactly precede unique line, otherwise wiped.
 	std::vector<std::string> back_buf;
+	std::string last_line;
 	while (!g_stop && is_piped && std::getline(std::cin, line)) {
 		if (g_mode == op_mode::rt_llama) {
 			if (line.empty()) {
@@ -772,15 +773,15 @@ int main(int argc, char* argv[])
 		}
 
 		std::string sq_line = squeeze_line(line);
-		if (sq_line.size() && next_id != c_bad_id) {
+		if (sq_line.empty() || sq_line == last_line) {
+			continue;
+		}
+		if (next_id != c_bad_id) {
 			// Partial match of predicted next line, should be at least 1/3 of original length
 			const auto& sq = g_lines[next_id].sq_text;
 			if (sq_line.size() >= sq.size() / 3 && sq.find(sq_line) + 1) {
 				sq_line = sq;
 			}
-		}
-		if (sq_line.empty()) {
-			continue;
 		}
 		auto it = g_strings.find(sq_line);
 		if (next_id == c_bad_id && (it == g_strings.end() || it->second == c_bad_id) && back_buf.empty()) {
@@ -809,6 +810,7 @@ int main(int argc, char* argv[])
 		if (it == g_strings.end()) {
 			continue;
 		}
+		last_line = sq_line;
 		if (g_mode == op_mode::rt_llama) {
 			id_queue.clear();
 		}
