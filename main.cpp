@@ -414,7 +414,7 @@ int main(int argc, char* argv[])
 		if (fd >= 0) {
 			// Map file in memory (alloc 1 more zero byte, like std::string)
 			const auto map_sz = file_list[i].second + 1;
-			const std::shared_ptr<void> file(mmap(0, map_sz, PROT_READ, MAP_PRIVATE, fd, 0), [=](void* ptr) {
+			const std::shared_ptr<void> file(mmap(0, map_sz, PROT_READ, MAP_SHARED, fd, 0), [=](void* ptr) {
 				munmap(ptr, map_sz);
 				close(fd);
 			});
@@ -750,6 +750,11 @@ int main(int argc, char* argv[])
 						return 1;
 				}
 
+				if (id_queue.empty() && next_id != c_bad_id) {
+					// Edge case of reloading
+					if (!translate(params, prev_id, tr_cmd::kick))
+						return false;
+				}
 				if (!flush_id_queue(false))
 					return 1;
 				continue;
