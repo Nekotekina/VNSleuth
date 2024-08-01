@@ -147,6 +147,7 @@ std::string squeeze_line(const std::string& line)
 	std::string_view prev, next;
 	for (const char& c : line) {
 		next = {};
+		// Decode UTF-8 sequence (TODO: better validation?)
 		if ((c & 0x80) == 0) {
 			next = std::string_view(&c, 1);
 		} else if ((c & 0xe0) == 0xc0) {
@@ -157,16 +158,24 @@ std::string squeeze_line(const std::string& line)
 			next = std::string_view(&c, 4);
 		}
 		for (auto& ch : next) {
-			// Check for null terminator
+			// Check for null terminator (`next` could be out of bounds)
 			if (ch == 0)
 				return r;
 			if (&ch > next.data() && (ch & 0xc0) != 0x80) {
 				// Invalid UTF-8 sequence
 				next = {};
+				prev = {};
 				break;
 			}
 		}
 		if (!next.empty() && next != prev) {
+			// Skip spaces (both ASCII and full-width) and control characters
+			if (next == "　"sv || next == " "sv)
+				continue;
+			if (next[0] + 0u < 32 || next[0] == '\x7f') {
+				prev = {};
+				continue;
+			}
 			// Append non-repeating code
 			r += next;
 			prev = next;
