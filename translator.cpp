@@ -15,7 +15,7 @@ extern std::string isuffix;
 
 extern std::string print_line(line_id id, std::string* line, bool stream);
 
-extern void update_segment(std::string_view prompt, uint seg);
+extern void update_segment(uint seg);
 
 bool translate(gpt_params& params, line_id id, tr_cmd cmd)
 {
@@ -49,6 +49,7 @@ bool translate(gpt_params& params, line_id id, tr_cmd cmd)
 	static std::deque<uint> chunks;			// Size (in tokens) of each translated message block
 	static uint decoded = 0;				// Number of token successfully llama_decode()'d
 	static uint segment = -1;				// Current segment
+	static std::string* prev_tail{};
 
 	static const struct _init_t {
 		explicit operator bool() const { return model && ctx; }
@@ -170,12 +171,11 @@ bool translate(gpt_params& params, line_id id, tr_cmd cmd)
 	auto eject_start = [&]() -> bool {
 		std::size_t count = 0;
 		while (tokens.size() - count + params.n_predict > params.n_ctx * 3 / 4 - 1u) {
-			if (auto c = eject_first()) {
-				count += c;
-			} else {
+			if (chunks.empty()) {
 				std::cerr << "Prompt too big or context is too small" << std::endl;
 				return false;
 			}
+			count += eject_first();
 		}
 
 		tokens.erase(tokens.begin() + params.n_keep, tokens.begin() + (params.n_keep + count));
@@ -183,14 +183,64 @@ bool translate(gpt_params& params, line_id id, tr_cmd cmd)
 	};
 
 	// Tokenize line and add to the tokens
-	auto push_line = [&](const std::string& text) -> uint {
+	auto push_str = [&](const std::string& text) -> uint {
 		uint r = 0;
-		for (auto& t : llama_tokenize(model, text, false)) {
+		auto tt = llama_tokenize(model, text, false);
+		if (params.verbosity && !tt.empty())
+			std::fprintf(stderr, "%s[tokens:%zu] push %zu tokens: '%s'\n", g_esc.reset, tokens.size(), tt.size(), text.c_str());
+		for (auto& t : tt) {
 			tokens.push_back(t);
 			chunks.back()++;
 			r++;
 		}
 		return r;
+	};
+
+	// Tokenize tr_text from id
+	auto push_id = [&](line_id id) {
+		auto tr_text = std::string_view(g_lines[id].tr_text);
+		auto spos = tr_text.find("\n" + isuffix) + 1;
+		if (!spos) {
+			throw std::runtime_error("Line untranslated: " + g_lines[id].tr_text);
+		}
+		// Tokenize original strings with annotations
+		std::size_t pref_pos = 0, post_pos = 0;
+		if (!tr_text.starts_with(iprefix)) {
+			post_pos = pref_pos = tr_text.find("\n" + iprefix) + 1;
+			if (pref_pos == 0)
+				throw std::runtime_error("Line without iprefix: " + g_lines[id].tr_text);
+		}
+		// Replay print_line logic
+		auto out = apply_replaces(g_lines[id].text);
+		// TODO: implement as regex replace
+		if (out.starts_with("…") && out != "…")
+			out.erase(0, "…"sv.size());
+		// Pre-annotations: no replaces, then original line with replaces
+		out = std::string(tr_text.substr(0, pref_pos)) + iprefix + g_lines[id].name + std::move(out) + "\n";
+		// Post-annotations: no replaces
+		post_pos += iprefix.size();
+		post_pos += g_lines[id].name.size();
+		post_pos += g_lines[id].text.size() + 1;
+		out += tr_text.substr(post_pos, spos - post_pos);
+		out += isuffix;
+		push_str(out);
+		tr_text.remove_prefix(spos);
+		tr_text.remove_prefix(isuffix.size());
+		int token_count = 0;
+		if (!g_lines[id].name.empty()) {
+			// Tokenize name separately
+			if (tr_text.starts_with(" "))
+				tr_text.remove_prefix(1);
+			auto it = g_speakers.find(g_lines[id].name);
+			if (it == g_speakers.end() || !tr_text.starts_with(it->second)) {
+				throw std::runtime_error("Name untranslated: " + g_lines[id].tr_text);
+			}
+			token_count += push_str((isuffix.ends_with(" ") ? "" : " ") + it->second);
+			tr_text.remove_prefix(it->second.size());
+		}
+		token_count += push_str(std::string(tr_text));
+		if (token_count > params.n_predict + 1)
+			throw std::runtime_error("Line too long: " + g_lines[id].tr_text);
 	};
 
 	auto decode = [&]() -> void {
@@ -209,15 +259,38 @@ bool translate(gpt_params& params, line_id id, tr_cmd cmd)
 	auto init_segment = [&]() -> void {
 		// Initialize segment: eject all first
 		eject_bunch(-1);
-		decode();
-		if (segment + 1) {
-			std::lock_guard lock(g_mutex);
 
-			for (auto& line : g_lines.segs[segment].lines) {
-				if (line.tr_text.empty())
-					break;
+		// Load full history
+		prev_tail = nullptr;
+		for (auto& id : g_history) {
+			if (g_lines[id].tr_text.empty())
+				break;
+			if (id.second == 0 && prev_tail) {
 				chunks.emplace_back();
-				push_line(line.tr_text);
+				push_str(*prev_tail);
+				prev_tail = nullptr;
+			}
+			chunks.emplace_back();
+			push_id(id);
+			auto& tail = g_lines.segs[id.first].tr_tail;
+			if (g_lines.is_last(id)) {
+				prev_tail = &tail;
+			}
+		}
+	};
+
+	auto add_tail_finalize = [&]() -> void {
+		if (segment + 1) {
+			auto& tail = g_lines.segs[segment].tr_tail;
+			if (id.second == 0 && !g_lines.segs[segment].lines.back().tr_text.empty()) {
+				// Finalize segment if necessary
+				if (tail.empty()) {
+					tail = "\n";
+					update_segment(segment);
+				}
+				prev_tail = nullptr;
+				chunks.emplace_back();
+				push_str(tail);
 			}
 		}
 	};
@@ -234,17 +307,15 @@ bool translate(gpt_params& params, line_id id, tr_cmd cmd)
 			return true;
 		}
 		if (id.first != segment) {
+			add_tail_finalize();
 			segment = id.first;
-			init_segment();
 		}
 		if (segment + 1) {
-			std::lock_guard lock(g_mutex);
-
-			for (line_id nid{segment, id.second}; nid != c_bad_id; g_lines.advance(nid)) {
+			for (line_id nid{segment, id.second}; g_lines.is_valid(nid); g_lines.advance(nid)) {
 				if (g_lines[nid].tr_text.empty())
 					break;
 				chunks.emplace_back();
-				push_line(g_lines[nid].tr_text);
+				push_id(nid);
 			}
 		}
 		decode();
@@ -254,12 +325,12 @@ bool translate(gpt_params& params, line_id id, tr_cmd cmd)
 	if (id.first != segment) {
 		// Update previous translation file
 		if (segment + 1) {
-			update_segment(params.prompt, segment);
+			add_tail_finalize();
 		}
 
-		// Initialize new segment
 		segment = id.first;
-		init_segment();
+		if (tokens.empty())
+			init_segment();
 	}
 
 	// Translate line(s)
@@ -311,11 +382,15 @@ bool translate(gpt_params& params, line_id id, tr_cmd cmd)
 						 chunks.size() ? chunks.back() : -1, std::accumulate(tokens.begin(), tokens.end(), 0ull), g_lines[pid].name.c_str(),
 						 g_lines[pid].text.data());
 
-		std::string llama_out;
-		const auto spker = print_line(pid, &llama_out, std::this_thread::get_id() == s_main_tid);
+		std::string llama_out = prev_tail && pid.second == 0 ? *prev_tail : std::string();
+		prev_tail = nullptr;
+		// TODO: this is broken as annotations should be preserved on rewrites
+		llama_out += std::exchange(g_lines.segs[pid.first].tr_tail, "");
+		std::string spker = print_line(pid, &llama_out, std::this_thread::get_id() == s_main_tid);
 		chunks.emplace_back();
 		uint dummy_size = 0;
-		if (seed && std::this_thread::get_id() == s_main_tid) {
+		// For some reason, seed 1 often produces more correct output. So why not always add a "dummy" (TODO)
+		if (seed) {
 			// Add dummy tokens to alter the output
 			// Because simply changing seed almost never changes the output (because of low temp?)
 			// TODO: explore other options, like removing one oldest chunk instead of adding tokens
@@ -329,9 +404,12 @@ bool translate(gpt_params& params, line_id id, tr_cmd cmd)
 				dummy += ' ';
 			dummy += std::to_string(seed);
 			dummy += '\n';
-			dummy_size = push_line(dummy);
+			dummy_size = push_str(dummy);
 		}
-		push_line(llama_out);
+		push_str(llama_out);
+		// Encode speaker separately and count its tokens
+		int pred_count = push_str(spker);
+		llama_out = spker;
 		// Worker thread doesn't eject translations
 		if (std::this_thread::get_id() == s_main_tid && !eject_start())
 			return false;
@@ -357,8 +435,10 @@ bool translate(gpt_params& params, line_id id, tr_cmd cmd)
 		}();
 		llama_sampling_reset(sctx);
 		llama_sampling_set_rng_seed(sctx, seed);
+		const bool use_grammar = !g_lines[pid].name.empty();
+		for (int i = 0; i < pred_count; i++)
+			llama_sampling_accept(sctx, ctx, *(tokens.rbegin() + pred_count - i), use_grammar);
 		static const auto real_isuffix = "\n" + isuffix;
-		int pred_count = 0;
 		while (!is_stopped() && !llama_out.ends_with("\n")) {
 			// Predict next token
 			auto stamp0 = std::chrono::steady_clock::now();
@@ -380,17 +460,50 @@ bool translate(gpt_params& params, line_id id, tr_cmd cmd)
 			}
 			tokens.push_back(token_id);
 
-			llama_sampling_accept(sctx, ctx, token_id, true);
-			auto trim = llama_out.ends_with(real_isuffix);
+			llama_sampling_accept(sctx, ctx, token_id, use_grammar);
 			llama_out += token_str;
+			int to_decode = 1;
+			// TODO: parse speaker first if not available, only apply replaces after speaker
+			{
+				// Perform limited replaces (only repeatable ones: TODO)
+				auto fixed = apply_replaces(llama_out, true, spker.size());
+				if (fixed != llama_out) {
+					if (g_mode == op_mode::rt_llama && std::this_thread::get_id() == s_main_tid) {
+						// Compensate for difference with spaces (TODO: it's probably not very beautiful)
+						// First, let the "wrong" string appear
+						std::cout << token_str;
+						if (auto diff = llama_out.size() - fixed.size(); diff <= llama_out.size()) {
+							std::cout << std::string(" ", diff);
+							std::cout << std::string("\b", diff);
+						}
+						std::cout << std::flush;
+					}
+					// Retokenize and replace only the few last tokens
+					auto tt = llama_tokenize(model, fixed, false);
+					auto [mis, mistt] = std::mismatch(tokens.end() - pred_count, tokens.end(), tt.begin(), tt.end());
+					uint miscount = tokens.end() - mis;
+					tokens.erase(mis, tokens.end());
+					int to_remove = miscount - to_decode;
+					to_decode = tt.end() - mistt;
+					tokens.insert(tokens.end(), mistt, tt.end());
+					chunks.back() -= to_remove;
+					const auto p0 = decoded - chunks.back();
+					decoded -= to_remove;
+					if (!llama_kv_cache_seq_rm(ctx, 0, p0, p0 + to_remove))
+						throw std::runtime_error("llama_kv_cache_seq_rm replaces");
+					llama_sampling_reset(sctx);
+					for (auto& t : tt)
+						llama_sampling_accept(sctx, ctx, t, use_grammar);
+					llama_out = std::move(fixed);
+				}
+			}
 			if (g_mode == op_mode::rt_llama && std::this_thread::get_id() == s_main_tid) {
-				if (trim && token_str.starts_with(" "))
-					token_str.erase(0, 1);
-				std::cout << token_str << std::flush; // Stream to terminal
+				std::cout << "\r" << g_esc.tran << llama_out.c_str() + llama_out.starts_with(" ");
+				std::cout << std::flush; // Stream to terminal
 			}
 
 			stamp0 = std::chrono::steady_clock::now();
-			if (auto result = llama_decode(ctx, llama_batch_get_one(&tokens[decoded], 1, decoded, 0))) {
+			if (auto result = llama_decode(ctx, llama_batch_get_one(&tokens[decoded], to_decode, decoded, 0))) {
 				std::cerr << "llama_decode failed: " << result << std::endl;
 				return false;
 			}
@@ -414,24 +527,31 @@ bool translate(gpt_params& params, line_id id, tr_cmd cmd)
 			return true;
 		}
 
-		// Try to parse translated name (TODO: name should be translated in a separate loop without grammar)
+		// Try to parse translated name
 		std::lock_guard lock(g_mutex);
 
-		if (spker.size()) {
+		auto& line = g_lines[pid];
+		if (spker.empty() && !line.name.empty()) {
 			std::string_view speaker = llama_out;
 			if (auto pos = speaker.find_first_not_of(" ") + 1)
 				speaker.remove_prefix(pos - 1);
 			speaker = speaker.substr(0, speaker.find_first_of(':') + 1);
 			if (speaker.empty() || speaker.find_first_of('"') + 1) {
-				std::cerr << "Failed to parse speaker translation for: " << spker << std::endl;
-				g_speakers[spker] = ":";
+				std::cerr << "Failed to parse speaker translation for: " << line.name << std::endl;
 			} else {
-				g_speakers[spker] = speaker;
+				auto& s = g_speakers[line.name] = speaker;
+				llama_out = s + std::move(llama_out);
 			}
 		}
 
 		// Store translated line
-		g_lines[pid].tr_text = std::move(llama_out);
+		line.tr_text = std::move(g_lines.segs[pid.first].tr_tail);
+		line.tr_text += iprefix;
+		line.tr_text += line.name;
+		line.tr_text += line.text;
+		line.tr_text += '\n';
+		line.tr_text += isuffix;
+		line.tr_text += llama_out;
 	}
 
 	if (!is_stopped() && std::this_thread::get_id() == s_main_tid && g_mode == op_mode::rt_llama && id != c_bad_id) {
@@ -446,6 +566,9 @@ bool translate(gpt_params& params, line_id id, tr_cmd cmd)
 			// Nothing to do
 			return true;
 		}
+
+		if (!g_lines.segs[id.first].tr_tail.empty())
+			return true;
 
 		// Make some space
 		if (!eject_start())

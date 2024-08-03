@@ -1,0 +1,18 @@
+This is an accurate translation of a Japanese novel to English.
+Line starting with En: only contains the translation of the preceding JP: line.
+Setting: contemporary Japan, high school.
+Genre: slice of life, comedy, romance, fantasy, mystery, erotic novel.
+Dictionary:
+大槻 宗真 (Ootsuki Souma) - male protagonist; student (2nd year).
+アキ (Aki) - ghost catgirl; older sister of the "twin gods"; cheerful; bright; curious; has cat ears and tail with white fur.
+ツキ (Tsuki) - materializing ghost catgirl; younger sister of the "twin gods"; serious; smart; timid; has black fur.
+文乃 (Ayano) - student girl (1st year); carefree; airhead; she grew cat ears and tail because Aki occupied her body.
+穂高 (Hotaka) - Ayano's surname.
+恋花 (Renka) - student girl (2nd year); kind; proactive; she is the granddaughter of the principal Kuji.
+律 (Ritsu) - old woman; principal of the Kuji Academy.
+久慈 (Kuji) - name of the Kuji Academy and also the surname of Renka and Ritsu.
+上路 弥生 (Ueji Yayoi) - female student (1st year); Ayano's classmate; otaku; reserved; stoic; famous occult enthusiast.
+新大谷市 (Shin'ooya City) - toponym.
+マタタビ (Matatabi) - plant that affects cats like cat mint does.
+LLNE - certain text message app name.
+<START>
