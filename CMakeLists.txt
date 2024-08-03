@@ -11,6 +11,8 @@ add_executable(vnsleuth
 	main.cpp
 	parser.cpp
 	translator.cpp
+	tools/parser_base.cpp
+	tools/format_arc_dsc.cpp
 )
 
 target_include_directories(vnsleuth

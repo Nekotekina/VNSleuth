@@ -1,39 +1,27 @@
+#include "parser.hpp"
 #include "main.hpp"
 #include "tools/iconv.hpp"
+#include "tools/tiny_sha1.hpp"
 #include <bit>
 #include <functional>
 #include <iostream>
 #include <regex>
 #include <string>
 #include <string_view>
+#include <unordered_set>
 #include <vector>
 
 static_assert("か"sv == "\xE3\x81\x8B"sv, "This source file shall be compiled as UTF-8 text");
 
 static /*thread_local*/ std::function<std::ostream&()> err = [] { return std::ref(std::cerr); };
 
-// Read little-endian number from string
-template <typename T, typename Off>
-bool read_le(T& dst, std::string_view data, Off&& pos)
-{
-	static_assert(std::endian::native == std::endian::little, "Big Endian platform support not implemented");
-	if (pos + sizeof(T) > data.size())
-		return false;
-	std::memcpy(&dst, data.data() + pos, sizeof(T));
-	if constexpr (!std::is_const_v<std::remove_reference_t<Off>>)
-		pos += sizeof(T); // Optionally increment position
-	return true;
-}
-
-// Read null-terminated Shift-JIS string from string
-bool read_sjis(std::string& dst, std::string_view data, std::size_t pos)
+// Convert from Windows-specific Shift-JIS encoding to UTF-8
+std::string from_sjis(std::string_view src)
 {
 	static const iconvpp::converter conv("UTF-8", "SJIS-WIN", true, 1024);
-	if (pos >= data.size())
-		return false;
-	dst.clear();
-	conv.convert(data.data() + pos, dst);
-	return true;
+	std::string dst;
+	conv.convert(src.data(), dst);
+	return dst;
 }
 
 bool is_text_bytes(std::string_view data)
@@ -49,6 +37,35 @@ bool is_text_bytes(std::string_view data)
 	}
 
 	return true;
+}
+
+void add_segment(const std::string& name, std::string_view data)
+{
+	if (!g_lines.segs.empty() && g_lines.segs.back().lines.empty()) {
+		g_lines.segs_by_name.erase(g_lines.segs.back().src_name);
+		g_lines.segs.pop_back();
+	}
+
+	auto& new_seg = g_lines.segs.emplace_back();
+	new_seg.src_name = name;
+	{
+		// Generate SHA1 hash for cache file name
+		// If some game update changes the script, it will result in creating a different cache file
+		char buf[42]{};
+		sha1::SHA1 s;
+		s.processBytes(data.data(), data.size());
+		std::uint32_t digest[5];
+		s.getDigest(digest);
+		std::snprintf(buf, 41, "%08x%08x%08x%08x%08x", digest[0], digest[1], digest[2], digest[3], digest[4]);
+		new_seg.cache_name += "__vnsleuth_";
+		new_seg.cache_name += buf;
+		new_seg.cache_name += ".txt";
+	}
+
+	// TODO: handle duplicates correctly
+	if (g_lines.segs_by_name.count(name))
+		throw std::runtime_error("Segment already exists: " + name);
+	g_lines.segs_by_name[name] = g_lines.segs.size() - 1;
 }
 
 void add_line(int choice, std::string name, std::string text)
@@ -157,18 +174,36 @@ std::string parse_ruby_eth(const std::string& text)
 	return result;
 }
 
-// Return number of lines parsed
-uint parse(std::string_view data)
-{
-	uint result = 0;
+// To avoid parsing all archives, limit the set of possible candidates
+static const std::unordered_set<std::string_view> script_locations{
+	{"data01000.arc"},
+};
 
+void script_parser::read_segments(const std::string& name)
+{
 	// Detect script format then parse appropriately
 	const bool is_text = is_text_bytes(data);
 
+	std::multimap<std::string, parser_func_t, natural_order_less> sorted_archive;
+	if (!is_text && script_locations.count(name)) {
+		auto arc = read_archive();
+		sorted_archive = decltype(sorted_archive)(std::make_move_iterator(arc.begin()), std::make_move_iterator(arc.end()));
+	}
+
+	if (!is_text && !sorted_archive.empty()) {
+		for (auto& [n, f] : sorted_archive) {
+			script_parser parser(f(true, nullptr).data);
+			//std::ofstream("__vnsleuth_dump_" + n, std::ios::trunc | std::ios::binary).write(parser.data.data(), parser.data.size());
+			parser.read_segments(n);
+		}
+		return;
+	}
+
 	if (!is_text && data.starts_with("BurikoCompiledScriptVer1.00\0"sv)) {
 		std::uint32_t add_off{}, off{}, op{};
-		if (!read_le(add_off, data, 0x1c))
-			return false;
+		if (!read_le(add_off, 0x1c) || data.size() < add_off)
+			return;
+		add_segment(name, data);
 		off = (add_off += 0x1c); // Offset added to PUSH opcode string location, and first OP offset
 		std::vector<std::string> stack;
 		err = [&] {
@@ -181,7 +216,7 @@ uint parse(std::string_view data)
 			std::cerr << "Error: ";
 			return std::ref(std::cerr);
 		};
-		while (read_le(op, data, off)) {
+		while (read_le(op, off)) {
 			switch (op) {
 			case 0:
 			case 1:
@@ -210,12 +245,12 @@ uint parse(std::string_view data)
 			}
 			if (op == 3) {
 				// PUSH
-				std::uint32_t addr{};
-				if (!read_le(addr, data, off))
+				auto [addr, ok] = read_le<4u>(off);
+				if (!ok)
 					break;
-				std::string buf;
-				if (read_sjis(buf, data, addr + add_off)) {
-					stack.emplace_back(std::move(buf));
+				auto [str, ok2] = read_le<0>(addr + add_off);
+				if (ok2) {
+					stack.emplace_back(from_sjis(str));
 				} else {
 					stack.clear(); // TODO
 				}
@@ -249,15 +284,10 @@ uint parse(std::string_view data)
 
 				// Add normal line
 				add_line(0, std::move(name), std::move(textfix));
-				result++;
 			}
 
 			stack.clear();
 			continue;
 		}
-
-		return result;
 	}
-
-	return 0;
 }

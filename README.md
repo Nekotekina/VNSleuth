@@ -27,13 +27,13 @@ make -C tools/xclipmonitor install
 ```
 
 ## Workflow
-1. Determine whether your VN's engine is supported. Extract all script files into a dedicated directory. Automated tool for script extraction may be added in future.
+1. Determine whether your VN's engine is supported.
 
 | Engine | Script location | Notes |
 |:-------:|:-------:|:-------:|
-| Buriko/ETH | data01000.arc | Extract data01000.arc with AE or GARbro |
+| Buriko/ETH | data01000.arc | Supported |
 
-2. Assuming you extracted scripts into `./Scripts/`, run `export P="./Scripts/" && vnsleuth "$P"` to initialize the script directory. You should see the number of script lines, dumped furigana and other technical information.
-2. Make sure `./Scripts/__vnsleuth_names.txt` was created and filled with all encountered names. Optionally, you can fill some of them manually. This is not required as VNSleuth will attempt to translate them automatically and fill this file accordingly, but that process may fail sometimes due to the nature of LLMs. Add English names after `:`, without spaces, and make sure the line ends with another `:`.
-2. Create `./Scripts/__vnsleuth_prompt.txt` that contains basic information about the VN (like protagonist name, heroines, toponyms). Consult /examples/ in the repository. There is no strict format to the prompt, but try to keep it brief and avoid repeating the same words. The most important part is probably the first line and "Dictionary". Character names are usually provided on https://vndb.org/ and dumped furigana can sometimes provide important word readings.
+2. Assuming the game location `~/Games/Game/`, run `export P=~/Games/Game && vnsleuth "$P" --check` to initialize __vnsleuth directory. You should see the number of script lines, dumped furigana and other technical information.
+2. Make sure `Game/__vnsleuth/__vnsleuth_names.txt` was created and filled with all encountered names. Optionally, you can fill some of them manually. This is not required as VNSleuth will attempt to translate them automatically and fill this file accordingly, but that process may fail sometimes due to the nature of LLMs. Add English names after `:`, without spaces, and make sure the line ends with another `:`.
+2. Create `Game/__vnsleuth/__vnsleuth_prompt.txt` that contains basic information about the VN (like protagonist name, heroines, toponyms). Consult /examples/ in the repository. There is no strict format to the prompt, but try to keep it brief and avoid repeating the same words. The most important part is probably the first line and "Dictionary". Character names are usually provided on https://vndb.org/ and dumped furigana can sometimes provide important word readings.
 2. Run `xclipmonitor lastfile "$P" | vnsleuth "$P" -m MODEL_PATH -co`, other arguments like temperature may be specified too if you know what are you doing. Now you can run VN with Textractor (use the extension to send hooked text to the clipboard) or some other tool which can copy text to the clipboard automatically. Some hooks may work incorrectly, you may need to add appropriate custom hook if necessary. Press `Enter` in the terminal or use 5th mouse button ("Forward") to regenerate the translation for the latest sentence. If translation is bad no matter how many times you regenerate it, you can edit it manually with command `e`. It's beneficial to fix mistakes early because they can affect following automatic translation positively. Other commands supported by xclipmonitor are `r` (reload) and `s` (save), but you probably don't need them.

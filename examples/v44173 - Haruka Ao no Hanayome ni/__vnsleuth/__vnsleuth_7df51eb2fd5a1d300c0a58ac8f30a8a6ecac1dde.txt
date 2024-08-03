@@ -1,0 +1,38 @@
+SRC:00com_01
+JP: ――沈む。
+En: ―Sinking.
+JP: 荒れていた海面とは打って変わり、海中は不思議と穏やかだった。
+En: In contrast to the rough sea surface, the underwater world was strangely calm.
+JP: 耳元で弾ける泡の音には、心地よさすら感じた。
+En: The sound of bubbles popping near my ears even felt pleasant.
+JP: ――沈む。
+En: ―Sinking.
+JP: ？？？:「ハルーっ！」
+En: ???: "Haru!"
+JP: ？？？:「にーちゃーんっ！！」
+En: ???: "Nii-chan!!"
+JP: 俺を呼ぶ声が、微かに耳に届いたような気がした。
+En: I thought I heard someone calling my name.
+JP: もがくことも、指ひとつ動かすこともできないまま。
+En: I couldn't struggle or move a single finger.
+JP: 意識は、深い水底へと吸い込まれていく。
+En: My consciousness was being sucked into the deep seabed.
+JP: 冷たくなるはずの身体は、不思議な温かさに包まれる。
+En: My body, which should have been cold, was enveloped in a strange warmth.
+JP: ああ、この感覚が、死ぬってことなのかな……？
+En: Ah, this feeling... is this what it means to die?
+JP: ごめんな。みなも。なつみ。
+En: I'm sorry, Minamo. Natsumi.
+JP: 俺、今度こそ死んじゃうみたいだ。
+En: It seems I'm going to die this time.
+JP: …………
+En: …
+JP: ……
+En: …
+JP: 垣間見えたのは、物心ついて間もない幼少の記憶。
+En: What I saw was a faint memory from my early childhood.
+JP: 息のできない冷たい水の中、誰かの優しい腕に抱かれた。
+En: In the cold water where I couldn't breathe, I was held in someone's gentle arms.
+JP: 夢か現実か――淡い境目の走馬灯。
+En: Was it a dream or reality? A faint slideshow of memories.
+

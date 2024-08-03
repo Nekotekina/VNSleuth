@@ -1,15 +1,19 @@
 This is an accurate translation of a Japanese novel to English.
 Line starting with En: only contains the translation of the preceding JP: line.
+All honorifics are always preserved as -san, -chan, -sama, etc.
 Setting: modern day Earth, fantasy.
 Genre: slice of life, comedy, romance, fantasy, mystery, erotic novel.
 Dictionary:
 アタランシア (Atalancia) - main place of action, deep underwater city unknown to normal people. Its denizens have animal-like ears and tails (kemonomimi).
-源 遥生 (Minamoto Haruki), or ハル (Haru) - male protagonist; visitor of Atalancia.
-源 みなも (Minamoto Minamo) - younger sister of Haruki; visitor of Atalancia; blunt and cheerful.
-佐波口 なつみ (Sawaguchi Natsumi) - childhood friend of Haruki; visitor of Atalancia; carefree and cheerful.
+遥生 (Haruki) - male protagonist; older brother of Minamo (she calls him Nii-chan); visitor of Atalancia.
+みなも (Minamo) - younger sister of Haruki; visitor of Atalancia; blunt and cheerful.
+源 (Minamoto) - surname of the siblings Haruki and Minamo.
+ハル (Haru) - Haruki's nickname.
+佐波口 なつみ (Sawaguchi Natsumi) - a friend girl; visitor of Atalancia; carefree and cheerful.
 ロザニア・カーニハン (Rosania Carnihan) - royal maid of Atalancia; serious and eccentric.
 ローザ (Rosa) - Rosania's nickname.
 イリオネーラ・ナギ・アタランシア (Irionela Nagi Atalancia) - first princess of Atalancia; young and refined.
 リオ (Rio) - Irionela (shortened).
 リィル・ナギ・アタランシア (Lill Nagi Atalancia), or just Lill - second princess of Atalancia, younger sister of Rio; shy and timid.
+凪 深一郎 (Nagi Shin'ichiro) - deceased father of Rio and Lill.
 <START>
