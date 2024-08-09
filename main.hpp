@@ -209,9 +209,6 @@ inline std::shared_mutex g_mutex;
 // Remove all repeating characters in line
 std::string squeeze_line(const std::string& line);
 
-// Parse script into global variables; return number of lines parsed
-uint parse(std::string_view data);
-
 // translate() control
 enum class tr_cmd {
 	translate, // Translate line in foreground

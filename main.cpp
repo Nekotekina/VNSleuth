@@ -1,7 +1,7 @@
 #include "main.hpp"
 #include "common.h"
 #include "llama.h"
-#include "tools/tiny_sha1.hpp"
+#include "parser.hpp"
 #include <algorithm>
 #include <chrono>
 #include <csignal>
@@ -146,6 +146,8 @@ namespace fs = std::filesystem;
 
 static std::string names_path, replaces_path;
 
+static fs::path vnsleuth_path;
+
 void update_names(const std::string& path)
 {
 	if (path.empty())
@@ -190,18 +192,18 @@ bool update_segment(uint seg)
 		dump += line.tr_text;
 	}
 	dump += g_lines.segs[seg].tr_tail;
-	std::ofstream file(g_lines.segs[seg].cache_name + ".tmp", std::ios_base::trunc | std::ios_base::binary);
+	std::ofstream file(vnsleuth_path / (g_lines.segs[seg].cache_name + ".tmp"), std::ios_base::trunc | std::ios_base::binary);
 	if (!file.is_open()) {
 		std::cerr << "Failed to open " << g_lines.segs[seg].cache_name << ".tmp" << std::endl;
 		return false;
 	}
 	file.write(dump.data(), dump.size());
 	file.close();
-	fs::rename(g_lines.segs[seg].cache_name + ".tmp", g_lines.segs[seg].cache_name);
+	fs::rename(vnsleuth_path / (g_lines.segs[seg].cache_name + ".tmp"), vnsleuth_path / g_lines.segs[seg].cache_name);
 	return true;
 }
 
-std::pair<uint, uint> load_translation(uint seg, const std::string& path, bool verify = false)
+std::pair<uint, uint> load_translation(uint seg, const fs::path& path, bool verify = false)
 {
 	std::ifstream cache(path);
 	if (!cache.is_open()) {
@@ -317,13 +319,13 @@ int main(int argc, char* argv[])
 	}
 
 	// Parse scripts in a given directory
-	std::string line, cache_path, prompt_path;
+	std::string line, prompt_path;
 	bool is_incomplete = false;
 	bool is_broken = false;
 
 	// Load file list recursively
 	std::string dir_name = argv[1];
-	fs::path vnsleuth_path = fs::absolute(fs::path(dir_name)).lexically_normal() / "__vnsleuth";
+	vnsleuth_path = fs::absolute(fs::path(dir_name)).lexically_normal() / "__vnsleuth";
 	std::vector<std::pair<std::string, std::size_t>> file_list;
 	if (fs::is_directory(dir_name)) {
 		fs::create_directory(vnsleuth_path);
@@ -442,33 +444,18 @@ int main(int argc, char* argv[])
 			});
 
 			// View file as chars
-			const std::string_view data(static_cast<char*>(file.get()), file_list[i].second);
-
-			{
-				// Generate SHA1 hash (only read first 1 MiB), generate cache path
-				char buf[42]{};
-				sha1::SHA1 s;
-				s.processBytes(data.data(), std::min<std::size_t>(1024 * 1024, data.size()));
-				std::uint32_t digest[5];
-				s.getDigest(digest);
-				std::snprintf(buf, 41, "%08x%08x%08x%08x%08x", digest[0], digest[1], digest[2], digest[3], digest[4]);
-				cache_path = vnsleuth_path;
-				cache_path += "/__vnsleuth_";
-				cache_path += buf;
-				cache_path += ".txt";
-			}
-
-			auto& new_seg = g_lines.segs.emplace_back();
-			new_seg.cache_name = cache_path;
-			new_seg.src_name = fs::path(file_list[i].first).filename();
-			if (parse(data)) {
+			script_parser data{{static_cast<char*>(file.get()), file_list[i].second}};
+			std::string name = fs::path(file_list[i].first).filename();
+			for (std::size_t x = g_lines.segs.size(), j = (data.read_segments(name), x); j < g_lines.segs.size(); j++) {
+				auto& new_seg = g_lines.segs[j];
 				if (g_mode == op_mode::print_info || g_mode == op_mode::rt_cached || g_mode == op_mode::rt_llama) {
 					if (g_mode == op_mode::print_info) {
-						std::cerr << "Found file: " << g_lines.segs.back().src_name << std::endl;
-						std::cerr << "Cache file: " << fs::path(cache_path).filename();
+						std::cerr << "Found data: " << new_seg.src_name << std::endl;
+						std::cerr << "Cache file: " << new_seg.cache_name;
 					}
+					auto cache_path = vnsleuth_path / new_seg.cache_name;
 					if (fs::is_regular_file(cache_path)) {
-						const auto [tr_lines, verified] = load_translation(g_lines.segs.size() - 1, cache_path, true);
+						const auto [tr_lines, verified] = load_translation(j, cache_path, true);
 						if (!verified) {
 							is_incomplete = true;
 							is_broken = true;
@@ -488,9 +475,6 @@ int main(int argc, char* argv[])
 						is_incomplete = true;
 					}
 				}
-				g_lines.segs_by_name[new_seg.src_name] = g_lines.segs.size() - 1;
-			} else {
-				g_lines.segs.pop_back();
 			}
 		} else {
 			std::cerr << "Error: Could not open file: " << file_list[i].first << std::endl;
@@ -676,7 +660,7 @@ int main(int argc, char* argv[])
 				if (!use_res)
 					continue;
 				std::error_code ec{};
-				auto time = fs::last_write_time(s.cache_name, ec);
+				auto time = fs::last_write_time(vnsleuth_path / s.cache_name, ec);
 				if (!ec && time >= last_time) {
 					result1 = last;
 					result2 = next;
@@ -842,7 +826,7 @@ int main(int argc, char* argv[])
 					std::lock_guard lock{g_mutex};
 					const uint segment = &seg - g_lines.segs.data();
 					if (!seg.lines[0].tr_text.empty()) {
-						auto [loaded, kept] = load_translation(segment, seg.cache_name);
+						auto [loaded, kept] = load_translation(segment, vnsleuth_path / seg.cache_name);
 						if (segment == next_id.first) {
 							kept_lines = kept;
 						} else if (kept + 1) {
