@@ -1,5 +1,6 @@
 #pragma once
 
+#include <bitset>
 #include <cstdint>
 #include <cstring>
 #include <map>
@@ -62,7 +63,7 @@ inline enum class op_mode {
 struct line_info {
 	std::string name;		  // Character name (speaker), may be empty
 	std::string text;		  // Original text
-	std::string_view sq_text; // Processed text (squeezed, owned permanently by g_strings)
+	std::u16string_view sq_text; // Processed text (squeezed, owned permanently by g_strings)
 	std::string tr_text;	  // Translated text (two-line format)
 	uint seed = 0;			  // Increases with each rewrite
 	std::vector<int> tr_tts;  // tr_text tokens
@@ -157,13 +158,54 @@ inline struct loaded_lines {
 			return true;
 		return false;
 	}
+
+	struct iterator final : private line_id {
+		constexpr iterator() : line_id(c_bad_id) {}
+		constexpr iterator(line_id id) : line_id(id) {}
+
+		constexpr auto operator<=>(const iterator&) const = default;
+
+		iterator operator++(int) noexcept;
+		iterator& operator++() noexcept;
+
+		line_info& operator*() const;
+		line_info* operator->() const { return &**this; }
+
+		line_id id() const { return *this; }
+	};
+
+	iterator begin() const { return {{0u, 0u}}; }
+	iterator end() const noexcept { return {}; }
 } g_lines;
 
+inline loaded_lines::iterator loaded_lines::iterator::operator++(int) noexcept
+{
+	iterator r = *this;
+	g_lines.advance(*this);
+	return r;
+}
+
+inline loaded_lines::iterator& loaded_lines::iterator::operator++() noexcept
+{
+	g_lines.advance(*this);
+	return *this;
+}
+
+inline line_info& loaded_lines::iterator::operator*() const
+{
+	// May throw
+	return g_lines[*this];
+}
+
 // String database for search (squeezed string -> line_id)
-inline std::unordered_map<std::string, line_id> g_strings;
+inline std::unordered_map<std::u16string, line_id> g_strings;
 
 // Auxiliary string search helper, only contains first lines in each segment
-inline std::unordered_map<std::string, line_id> g_start_strings;
+inline std::unordered_map<std::u16string, line_id> g_start_strings;
+
+// Map of all encountered characters (by char16_t max value)
+// Characters outside of first plane will be truncated
+inline std::bitset<0x10000> g_chars{};
 
 // Furigana database (word ; reading)
 inline std::set<std::pair<std::string, std::string>> g_furigana;
@@ -240,7 +282,7 @@ inline std::vector<line_id> g_history;
 inline std::shared_mutex g_mutex;
 
 // Remove all repeating characters in line
-std::string squeeze_line(const std::string& line);
+std::u16string squeeze_line(const std::string& line);
 
 // translate() control
 enum class tr_cmd {

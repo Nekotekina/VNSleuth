@@ -14,6 +14,7 @@
 #include <iostream>
 #include <memory>
 #include <mutex>
+#include <span>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -31,6 +32,15 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #endif
+
+#ifdef _MSC_VER
+#include <intrin.h>
+#else
+#include <x86intrin.h>
+#endif
+
+#include <emmintrin.h>
+#include <immintrin.h>
 
 static_assert("か"sv == "\xE3\x81\x8B"sv, "This source file shall be compiled as UTF-8 text");
 
@@ -98,22 +108,28 @@ std::string print_line(line_id id, std::string* line = nullptr, bool stream = fa
 	return speaker;
 }
 
-std::string squeeze_line(const std::string& line)
+std::u16string squeeze_line(const std::string& line)
 {
 	// For opportunistic compatibility with "bad" hooks which repeat characters, or remove repeats
-	std::string r;
-	std::string_view prev, next;
+	std::u16string r;
+	std::string_view next;
+	char16_t prev{};
 	for (const char& c : line) {
 		next = {};
-		// Decode UTF-8 sequence (TODO: better validation?)
+		char32_t utf32 = 0;
+		// Decode UTF-8 sequence
 		if ((c & 0x80) == 0) {
 			next = std::string_view(&c, 1);
+			utf32 = c;
 		} else if ((c & 0xe0) == 0xc0) {
 			next = std::string_view(&c, 2);
+			utf32 = (c & 0x1f);
 		} else if ((c & 0xf0) == 0xe0) {
 			next = std::string_view(&c, 3);
+			utf32 = (c & 0x0f);
 		} else if ((c & 0xf8) == 0xf0) {
 			next = std::string_view(&c, 4);
+			utf32 = (c & 0x07);
 		}
 		for (auto& ch : next) {
 			// Check for null terminator (`next` could be out of bounds)
@@ -122,24 +138,172 @@ std::string squeeze_line(const std::string& line)
 			if (&ch > next.data() && (ch & 0xc0) != 0x80) {
 				// Invalid UTF-8 sequence
 				next = {};
-				prev = {};
+				prev = 0;
 				break;
 			}
+			if (&ch > next.data()) {
+				utf32 <<= 6;
+				utf32 |= (ch & 0x3f);
+			}
 		}
-		if (!next.empty() && next != prev) {
+		if (!next.empty() && static_cast<char16_t>(utf32) != prev) {
 			// Skip spaces (both ASCII and full-width) and control characters
 			if (next == "　"sv || next == " "sv)
 				continue;
 			if (next[0] + 0u < 32 || next[0] == '\x7f') {
-				prev = {};
+				prev = 0;
 				continue;
 			}
-			// Append non-repeating code
-			r += next;
-			prev = next;
+			// Append non-repeating code (truncate higher bits)
+			r += static_cast<char16_t>(utf32);
+			prev = r.back();
 		}
 	}
 	return r;
+}
+
+// Return the "cost" of changing strings s to t
+// Implementation of https://en.wikipedia.org/wiki/Levenshtein_distance#Iterative_with_two_matrix_rows
+uint levenshtein_distance(std::u16string_view s, std::u16string_view t)
+{
+	if ((s.size() | t.size()) > 255)
+		throw std::out_of_range("levenshtein_distance: strings too big");
+	std::array<unsigned char, 256> v1_, v0_;
+	auto v0 = v0_.data();
+	auto v1 = v1_.data();
+	for (uint i = 0; i < t.size() + 1; i++)
+		v0[i] = i;
+	for (uint i = 0; i < s.size(); i++) {
+		v1[0] = i + 1;
+		for (uint j = 0; j < t.size(); j++) {
+			const uint del_cost = v0[j + 1] + 1;
+			const uint ins_cost = v1[j] + 1;
+			const uint sub_cost = v0[j] + (s[i] != t[j]);
+			v1[j + 1] = std::min({del_cost, ins_cost, sub_cost});
+		}
+		std::swap(v0, v1);
+	}
+	return v0[t.size()];
+}
+
+// Stored "columns" of g_strings for linear memory access
+static std::vector<std::vector<char16_t>> s_char_columns(255);
+
+// Return vector of the most matching strings
+std::vector<std::u16string_view> levenshtein_distance(uint skip, std::span<const std::u16string_view> span, std::u16string_view t, uint last = -1)
+{
+	std::vector<std::u16string_view> result;
+	const auto pitch = (span.size() + 31) & -32;
+	const auto flat_size = pitch * (t.size() + 1);
+	static constexpr auto av = std::align_val_t{32};
+	auto v0_flat = new (av) unsigned char[flat_size];
+	auto v1_flat = new (av) unsigned char[flat_size];
+	char16_t* ith = nullptr;
+	for (uint i = 0; i < t.size() + 1; i++) {
+		std::memset(v0_flat + i * pitch, i, pitch);
+	}
+	std::size_t max_str = span.empty() ? 0 : span[0].size();
+	std::size_t min_str = 1;
+	uint k0 = 0;
+	uint k1 = span.size();
+	for (uint i = 0; i < max_str; i++) {
+		ith = s_char_columns[i].data() + skip;
+		auto v0j = v0_flat;
+		auto v0j2 = v0j + pitch;
+		auto v1j = v1_flat;
+		auto v1j2 = v1j + pitch;
+#if defined(__SSE2__)
+		for (uint k = k0 & -16; k < k1; k += 16) {
+			_mm_store_si128((__m128i*)(v1j + k), _mm_set1_epi8(i + 1));
+		}
+#else
+		std::memset(v1j + k0, i + 1, k1 - k0);
+#endif
+		for (uint j = 0; j < t.size(); j++) {
+#if defined(__AVX2__)
+			auto tj = _mm256_set1_epi16(t[j]);
+			for (uint k = k0 & -31; k < k1; k += 32) {
+				auto del_cost = _mm256_add_epi8(_mm256_load_si256((const __m256i*)(v0j2 + k)), _mm256_set1_epi8(1));
+				auto ins_cost = _mm256_add_epi8(_mm256_load_si256((const __m256i*)(v1j + k)), _mm256_set1_epi8(1));
+				auto m0 = _mm256_cmpeq_epi16(_mm256_loadu_si256((const __m256i_u*)(ith + k)), tj);
+				auto m1 = _mm256_cmpeq_epi16(_mm256_loadu_si256((const __m256i_u*)(ith + k + 16)), tj);
+				auto value = _mm256_add_epi8(_mm256_load_si256((const __m256i*)(v0j + k)), _mm256_set1_epi8(1));
+				auto mask = _mm256_permute4x64_epi64(_mm256_packs_epi16(m0, m1), 0xd8);
+				auto sub_cost = _mm256_add_epi8(value, mask);
+				auto min_cost = _mm256_min_epu8(_mm256_min_epu8(del_cost, ins_cost), sub_cost);
+				_mm256_store_si256((__m256i*)(v1j2 + k), min_cost);
+			}
+#elif defined(__SSE2__)
+			auto tj = _mm_set1_epi16(t[j]);
+			for (uint k = k0 & -16; k < k1; k += 16) {
+				auto del_cost = _mm_add_epi8(_mm_load_si128((const __m128i*)(v0j2 + k)), _mm_set1_epi8(1));
+				auto ins_cost = _mm_add_epi8(_mm_load_si128((const __m128i*)(v1j + k)), _mm_set1_epi8(1));
+				auto m0 = _mm_cmpeq_epi16(_mm_loadu_si128((const __m128i_u*)(ith + k)), tj);
+				auto m1 = _mm_cmpeq_epi16(_mm_loadu_si128((const __m128i_u*)(ith + k + 8)), tj);
+				auto value = _mm_add_epi8(_mm_load_si128((const __m128i*)(v0j + k)), _mm_set1_epi8(1));
+				auto mask = _mm_packs_epi16(m0, m1);
+				auto sub_cost = _mm_add_epi8(value, mask);
+				auto min_cost = _mm_min_epu8(_mm_min_epu8(del_cost, ins_cost), sub_cost);
+				_mm_store_si128((__m128i*)(v1j2 + k), min_cost);
+			}
+// 			auto tj = _mm512_set1_epi16(t[j]);
+// 			for (uint k = k0 & -63; k < k1; k += 64) {
+// 				auto del_cost = _mm512_add_epi8(_mm512_load_epi8(v0j2 + k), _mm512_set1_epi8(1));
+// 				auto ins_cost = _mm512_add_epi8(_mm512_load_epi8(v1j + k), _mm512_set1_epi8(1));
+// 				__mmask64 mask = _mm512_cmp_epi16_mask(_mm512_loadu_epi16(ith + k), tj, _MM_CMPINT_NE);
+// 				__mmask64 mask2 = _mm512_cmp_epi16_mask(_mm512_loadu_epi16(ith + k + 32), tj, _MM_CMPINT_NE);
+// 				mask |= mask2 << 32;
+// 				auto value = _mm512_load_epi8(v0j + k);
+// 				auto sub_cost = _mm512_mask_add_epi8(value, mask, value, _mm512_set1_epi8(1));
+// 				auto min_cost = _mm512_min_epu8(_mm512_min_epu8(del_cost, ins_cost), sub_cost);
+// 				_mm512_store_epi8(v1j2 + k, min_cost);
+// 			}
+#else
+			for (uint k = k0; k < k1; k++) {
+				uint del_cost = v0j2[k] + 1;
+				uint ins_cost = v1j[k] + 1;
+				uint sub_cost = v0j[k] + (ith[k] != t[j]);
+				v1j2[k] = std::min({del_cost, ins_cost, sub_cost});
+			}
+#endif
+
+			v0j += pitch;
+			v0j2 += pitch;
+			v1j += pitch;
+			v1j2 += pitch;
+		}
+		for (uint k = k0; k < k1; k++) {
+			auto s = span[k];
+			if (i + 1 == s.size()) {
+				const uint res = v1j[k];
+				//if (res != levenshtein_distance(s, t))
+				//	throw std::runtime_error("Batch failed: " + std::to_string(res));
+				if (res < last) {
+					last = res;
+					result.clear();
+				}
+				if (res == last) {
+					result.push_back(s);
+					if (res != levenshtein_distance(s, t))
+						throw std::runtime_error("Bug: levenshtein_distance batch failed.");
+				}
+				// TODO: fix optimizations
+				//max_str = std::min(max_str, last + s.size());
+				// if (s.size() > last)
+				// 	min_str = std::max(min_str, s.size() - last);
+				//if (s.size() > max_str)
+				//	k0 = std::max(k0, k + 1);
+				// while (s.size() < min_str) {
+				// 	k1 = k;
+				// 	s = span[--k];
+				// }
+			}
+		}
+		std::swap(v0_flat, v1_flat);
+	}
+	operator delete[](v0_flat, av);
+	operator delete[](v1_flat, av);
+	return result;
 }
 
 namespace fs = std::filesystem;
@@ -753,8 +917,8 @@ int main(int argc, char* argv[])
 				static const auto alt_iprefix = "\n" + real_iprefix;
 				if (!out.starts_with(real_iprefix)) {
 					if (auto pref_pos = out.find(alt_iprefix) + 1) {
-						out.insert(0, g_esc.orig);
 						out.erase(pref_pos, alt_iprefix.size() - 1);
+						out.insert(0, g_esc.orig);
 					} else {
 						std::cerr << iprefix << " not found in translation cache." << std::endl;
 						return false;
@@ -799,7 +963,7 @@ int main(int argc, char* argv[])
 		return true;
 	};
 
-	std::string last_line;
+	std::u16string last_line;
 	if (g_mode == op_mode::rt_llama) {
 		// Show previous message(s) in a limited fashion (one message + selections)
 		auto it = g_history.rbegin();
@@ -825,7 +989,7 @@ int main(int argc, char* argv[])
 	// When line is found and is unique, the back buffer is flushed as well.
 	// When line is found but not unique, it's added to the back buffer.
 	// Previous non-unique lines are printed if they exactly precede unique line, otherwise wiped.
-	std::vector<std::string> back_buf;
+	std::vector<std::u16string> back_buf;
 	while (!g_stop && std::getline(std::cin, line)) {
 		if (g_mode == op_mode::rt_llama) {
 			if (line.empty()) {
@@ -930,18 +1094,36 @@ int main(int argc, char* argv[])
 			}
 		}
 
-		std::string sq_line = squeeze_line(line);
-		if (sq_line.empty() || sq_line == last_line) {
+		std::u16string sq_line = squeeze_line(line);
+		// Erase all characters that aren't encountered in scripts
+		std::erase_if(sq_line, [](char16_t c) { return !g_chars[c]; });
+		// Squeeze again
+		sq_line.erase(std::unique(sq_line.begin(), sq_line.end()), sq_line.end());
+		// Levenshtein distance must fit in a single byte in this implementation
+		if (sq_line.empty() || sq_line == last_line || sq_line.size() > 255) {
 			continue;
 		}
-		if (next_id != c_bad_id) {
-			// Partial match of predicted next line, should be at least 1/3 of original length
+		auto it = g_strings.find(sq_line);
+		bool force_ambi = false;
+		if (next_id != c_bad_id && (it != g_strings.end() && it->second != next_id)) {
+			// Exact mismatch has no definitive solution because sq_line can be still close to next_id
 			const auto& sq = g_lines[next_id].sq_text;
-			if (sq_line.size() >= sq.size() / 3 && sq.find(sq_line) + 1) {
-				sq_line = sq;
+			if (levenshtein_distance(sq_line, sq) <= std::max<uint>(3, sq.size() * 1 / 3)) {
+				// TODO: back_buf implementation is outdated, prefer exact match for now
+				//force_ambi = true;
+				if (it->second != c_bad_id) {
+					std::cerr << "Warning: ambiguous line: " << line << std::endl;
+				}
 			}
 		}
-		auto it = g_strings.find(sq_line);
+		if (next_id != c_bad_id && (it == g_strings.end() || it->second == c_bad_id)) {
+			// Fuzzy match of predicted next line
+			const auto& sq = g_lines[next_id].sq_text;
+			if (levenshtein_distance(sq_line, sq) <= sq.size() * 2 / 3) {
+				sq_line = sq;
+				it = g_strings.find(sq_line);
+			}
+		}
 		if (next_id == c_bad_id && (it == g_strings.end() || it->second == c_bad_id) && back_buf.empty()) {
 			// For smoother startup from an ambiguous line, attempt to show first line in a segment
 			const auto it2 = g_start_strings.find(sq_line);
@@ -949,8 +1131,8 @@ int main(int argc, char* argv[])
 				next_id = it2->second;
 			} else {
 				for (const auto& [sq, id] : g_start_strings) {
-					// Partial match fallback
-					if (sq_line.size() >= sq.size() / 3 && sq.find(sq_line) + 1) {
+					// Fuzzy match fallback
+					if (levenshtein_distance(sq_line, sq) <= sq.size() * 2 / 3) {
 						if (next_id != c_bad_id) {
 							// Multiple matches, abort search
 							next_id = c_bad_id;
@@ -965,7 +1147,79 @@ int main(int argc, char* argv[])
 				}
 			}
 		}
-		if (it == g_strings.end()) {
+		if (!force_ambi && it == g_strings.end()) {
+			// Fallback full fuzzy search (naïve, bruteforce)
+			static const auto sorted_sqstrings = []() -> std::vector<std::u16string_view> {
+				// List squeezed strings
+				std::vector<std::u16string_view> result;
+				result.reserve(g_strings.size());
+				for (auto& [sq, _] : g_strings) {
+					result.push_back(sq);
+				}
+				// Sort so bigger ones go first
+				std::sort(result.begin(), result.end(), [](auto a, auto b) {
+					if (a.size() > b.size())
+						return true;
+					if (a.size() < b.size())
+						return false;
+					return a < b;
+				});
+				for (uint j = 0; j < result.size(); j++) {
+					for (uint i = 0; i < result[j].size(); i++) {
+						s_char_columns[i].resize(result.size());
+						s_char_columns[i][j] = result[j][i];
+					}
+				}
+				return result;
+			}();
+			std::u16string_view found{};
+			// uint last = -1;
+			// uint runs = 0;
+			// auto stamp0 = std::chrono::steady_clock::now();
+			// for (const auto& sq : sorted_sqstrings) {
+			// 	// Optimizations: skip strings if size difference exceeds limit
+			// 	if (sq.size() > sq_line.size() * 3 / 2 || sq.size() < sq_line.size() * 2 / 3)
+			// 		continue;
+			// 	if (sq.size() > sq_line.size() && sq.size() - sq_line.size() > last)
+			// 		continue;
+			// 	if (sq.size() < sq_line.size() && sq_line.size() - sq.size() > last)
+			// 		continue;
+			// 	runs++;
+			// 	uint next = levenshtein_distance(sq_line, sq);
+			// 	if (next > sq.size() * 2 / 3)
+			// 		continue;
+			// 	if (next == last) {
+			// 		// Ambiguous (TODO?)
+			// 		found = {};
+			// 	}
+			// 	if (next < last) {
+			// 		last = next;
+			// 		found = sq;
+			// 	}
+			// }
+			auto stamp1 = std::chrono::steady_clock::now();
+			std::span<const std::u16string_view> span = sorted_sqstrings;
+			while (!span.empty() && span.back().size() < sq_line.size() * 2 / 3)
+				span = span.subspan(0, span.size() - 1);
+			std::size_t skip = 0;
+			while (skip < span.size() && span[skip].size() > sq_line.size() * 3 / 2)
+				skip++;
+			auto result = levenshtein_distance(skip, span.subspan(skip), sq_line, sq_line.size() / 2 + 1);
+			if (result.size() == 1) {
+				// TODO: handle multiple results
+				found = result[0];
+			}
+			auto stamp2 = std::chrono::steady_clock::now();
+			// auto time_ns = 0ns + stamp1 - stamp0;
+			// std::cerr << "Full search took " << time_ns.count() / 1e6 << "ms, Len=" << sq_line.size() << ", runs=" << runs << std::endl;
+			auto time_ns2 = 0ns + stamp2 - stamp1;
+			std::cerr << "Batch search took " << time_ns2.count() / 1e6 << "ms, Span=" << span.size() - skip << " R=" << result.size() << std::endl;
+			if (!found.empty()) {
+				sq_line = found;
+				it = g_strings.find(sq_line);
+			}
+		}
+		if (!force_ambi && it == g_strings.end()) {
 			if (params.verbosity)
 				std::fprintf(stderr, "String rejected: %s\n", line.c_str());
 			continue;
@@ -977,7 +1231,7 @@ int main(int argc, char* argv[])
 		line_id last_id = next_id;
 		if (last_id == c_bad_id || g_lines[last_id].sq_text != sq_line) {
 			// Handle unexpected line:
-			if (it->second == c_bad_id) {
+			if (force_ambi || it->second == c_bad_id) {
 				// Remember ambiguous line
 				std::cerr << g_esc.buf << "Buffered: " << line << std::endl;
 				back_buf.emplace_back(std::move(sq_line));
