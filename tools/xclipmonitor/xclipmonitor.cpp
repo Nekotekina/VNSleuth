@@ -18,7 +18,90 @@
 #include <termios.h>
 #include <unistd.h>
 
+using namespace std::literals;
+
 volatile bool g_stop = false;
+
+std::string xsel(bool selection = false, bool clear = false)
+{
+	// -p: retrieve PRIMARY selection
+	// -b: retrieve CLIPBOARD
+	// -o: write to STDOUT
+	// -c: clear
+	// -t: timeout 100 ms
+	std::string cmd = "-";
+	cmd += selection ? "po" : "bo";
+	cmd += clear ? "c" : "";
+	const char* args[] = {"xsel", cmd.c_str(), "-t", "100", nullptr};
+
+	int opipe_fd[2]{}; // [0] Reading from xsel stdout
+	if (pipe2(opipe_fd, O_NONBLOCK) != 0) {
+		perror("Failed to create pipe");
+		std::exit(1);
+	}
+
+	// Fork a child process
+	pid_t pid = fork();
+	if (pid == 0) {
+		// Inside the child process
+		while ((dup2(opipe_fd[1], STDOUT_FILENO) == -1) && (errno == EINTR)) {}
+		close(opipe_fd[0]);
+		close(opipe_fd[1]);
+
+		// Execute xsel
+		execvp(args[0], const_cast<char**>(args));
+		perror("execvp failed for 'xsel'");
+		std::exit(1);
+	}
+
+	// Wait for child
+	const auto s0 = std::chrono::steady_clock::now();
+	while (true) {
+		// Sleep for 5 ms, I guess there's no point in more complex waiting implementation
+		usleep(5000);
+		int wstatus = 0;
+		if (waitpid(pid, &wstatus, WNOHANG) == pid) {
+			if (int res = WEXITSTATUS(wstatus)) {
+				perror("xsel failed");
+				std::exit(res);
+			}
+			break;
+		}
+		const auto s1 = std::chrono::steady_clock::now();
+		if (long d = std::chrono::duration_cast<std::chrono::milliseconds>(s1 - s0).count(); g_stop || d > 200) {
+			// Kill xsel after 200 ms
+			kill(pid, SIGKILL);
+			waitpid(pid, nullptr, 0);
+			pid = 0;
+			break;
+		}
+	}
+
+	std::string buf = "\0";
+	if (pid != 0 && !g_stop) {
+		// Read with size limit
+		buf.resize(1000);
+		buf.resize(std::max<ssize_t>(0, read(opipe_fd[0], buf.data(), buf.size())));
+		if (buf.size() >= 1000)
+			buf.clear();
+	}
+
+	close(opipe_fd[0]);
+	close(opipe_fd[1]);
+	return buf;
+}
+
+// Replace newlines with \t, remove trailing newlines also
+std::string flatten(std::string buf)
+{
+	for (auto& ch : buf) {
+		if (ch == '\n')
+			ch = '\t';
+	}
+	while (buf.ends_with("\t"))
+		buf.erase(buf.end() - 1);
+	return buf;
+}
 
 void sigh(int) { g_stop = true; }
 
@@ -78,10 +161,8 @@ int main(int argc, char* argv[])
 	free(mask[0].mask);
 	free(mask[1].mask);
 
-	// -b: retrieve CLIPBOARD
-	// -t: timeout 100 ms
-	const char* args[] = {"xsel", "-b", "-t", "100", nullptr};
-
+	// Workaround for "double clicks" (reason uncertain)
+	auto last_rewrite = std::chrono::steady_clock::now();
 	std::string buf, last_text;
 	while (!g_stop) {
 		// Wait for events with 300ms timeout
@@ -110,7 +191,18 @@ int main(int argc, char* argv[])
 			if (XGetEventData(disp, cookie) && cookie->type == GenericEvent) {
 				XIRawEvent* event = (XIRawEvent*)cookie->data;
 				if (cookie->evtype == XI_RawButtonPress && event->detail == 9) {
-					putchar('\n');
+					// Send ^A rewrite request
+					// Retrieve current text selection and send it
+					auto rwtime = std::chrono::steady_clock::now();
+					if (rwtime - last_rewrite < 1s) {
+						continue;
+					} else if (auto sel = xsel(true, true); !sel.empty()) {
+						putchar('\01');
+						puts(flatten(sel).c_str());
+					} else {
+						putchar('\n');
+					}
+					last_rewrite = rwtime;
 					fflush(stdout);
 					continue;
 				}
@@ -121,6 +213,9 @@ int main(int argc, char* argv[])
 		if (poll(&ifd, 1, 0) > 0) {
 			char c{};
 			if (read(STDIN_FILENO, &c, 1) == 1) {
+				// Replace "dangerous" Reload command with safer Edit
+				if (c == 'r')
+					c = 'e';
 				if (c >= 'a' && c <= 'z') {
 					// Convert lowercase letters
 					c -= 'a';
@@ -144,7 +239,24 @@ int main(int argc, char* argv[])
 					c = '\x12'; // ^R - reload request
 				}
 				if (c > 0 && c < 32) {
-					putchar(c);
+					if (c == '\01') {
+						// Send ^A rewrite request
+						// Retrieve current text selection and send it
+						auto rwtime = std::chrono::steady_clock::now();
+						if (rwtime - last_rewrite < 1s) {
+							c = '\n';
+						} else if (auto sel = xsel(true); !sel.empty()) {
+							last_rewrite = rwtime;
+							putchar('\01');
+							puts(flatten(sel).c_str());
+							c = '\n';
+						} else {
+							last_rewrite = rwtime;
+							// Single \n will be sent
+						}
+					} else {
+						putchar(c);
+					}
 					if (c != '\n')
 						putchar('\n');
 					fflush(stdout);
@@ -163,81 +275,15 @@ int main(int argc, char* argv[])
 			continue;
 		}
 
-		int opipe_fd[2]{}; // [0] Reading from xsel stdout
-		if (pipe2(opipe_fd, O_NONBLOCK) != 0) {
-			perror("Failed to create pipe");
-			return 1;
-		}
-
-		// Fork a child process
-		pid_t pid = fork();
-		if (pid == 0) {
-			// Inside the child process
-			while ((dup2(opipe_fd[1], STDOUT_FILENO) == -1) && (errno == EINTR)) {}
-			close(opipe_fd[0]);
-			close(opipe_fd[1]);
-
-			// Execute xsel
-			execvp(args[0], const_cast<char**>(args));
-			perror("execvp failed for 'xsel'");
-			return 1;
-		}
-
-		// Wait for child
-		{
-			const auto s0 = std::chrono::steady_clock::now();
-			while (true) {
-				// Sleep for 5 ms, I guess there's no point in more complex waiting implementation
-				usleep(5000);
-				int wstatus = 0;
-				if (waitpid(pid, &wstatus, WNOHANG) == pid) {
-					if (int res = WEXITSTATUS(wstatus)) {
-					perror("xsel failed");
-					return res;
-					}
-					break;
-				}
-				const auto s1 = std::chrono::steady_clock::now();
-				if (long d = std::chrono::duration_cast<std::chrono::milliseconds>(s1 - s0).count(); d > 200) {
-					// Kill xsel after 200 ms
-					kill(pid, SIGKILL);
-					waitpid(pid, nullptr, 0);
-					pid = 0;
-					break;
-				}
-			}
-
-			if (pid == 0) {
-				close(opipe_fd[0]);
-				close(opipe_fd[1]);
-				continue;
-			}
-		}
-
-		// Read with size limit
-		buf.resize(1000);
-		buf.resize(std::max<ssize_t>(0, read(opipe_fd[0], buf.data(), buf.size())));
-		if (buf.size() >= 1000)
-			buf.clear();
+		std::string buf = xsel(false);
 		if (!buf.empty() && buf != last_text) {
 			// Filter duplications
 			last_text = buf;
-			for (auto& ch : buf) {
-				// Replace newlines with \t
-				if (ch == '\n')
-					ch = '\t';
-			}
-			while (buf.ends_with("\t"))
-				buf.erase(buf.end() - 1);
-			printf("%s\n", buf.c_str());
+			puts(flatten(buf).c_str());
 			fflush(stdout);
 		} else if (buf.empty()) {
 			last_text.clear();
 		}
-
-		close(opipe_fd[0]);
-		close(opipe_fd[1]);
-		buf.clear();
 	}
 
 	XCloseDisplay(disp);

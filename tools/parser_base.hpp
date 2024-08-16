@@ -211,6 +211,8 @@ struct owning_parser : private std::string, public parser_base {
 	owning_parser(std::size_t size) : std::string(size, '\0'), parser_base(this->operator std::string_view()) {}
 
 	using parser_base::data;
+
+	std::string move() { return std::move(*static_cast<std::string*>(this)); }
 };
 
 // clang-format off

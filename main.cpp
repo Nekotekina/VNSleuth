@@ -64,11 +64,7 @@ std::string example = "JP: この物語はフィクションです。\n"
 // Print line, return original speaker name if first encountered
 std::string print_line(line_id id, std::string* line = nullptr, bool stream = false)
 {
-	std::string out = apply_replaces(g_lines[id].text);
-	// TODO: implement as regex replace
-	if (out.starts_with("…") && out != "…")
-		out.erase(0, "…"sv.size());
-
+	std::string out = apply_replaces(g_lines[id].text, false, 0);
 	std::string speaker;
 	if (g_lines[id].name.starts_with("選択肢#")) {
 		// Insert translated choice selection prefix
@@ -102,7 +98,6 @@ std::string print_line(line_id id, std::string* line = nullptr, bool stream = fa
 		line->append(g_lines[id].name);
 		line->append(out);
 		line->append("\n");
-		line->append(isuffix);
 	}
 
 	return speaker;
@@ -334,7 +329,7 @@ void update_names(const std::string& path)
 	}
 }
 
-bool update_segment(uint seg, bool upd_names = true)
+bool update_segment(uint seg, bool upd_names = true, uint count = -1)
 {
 	std::lock_guard lock(g_mutex);
 
@@ -351,11 +346,15 @@ bool update_segment(uint seg, bool upd_names = true)
 		dump += '\n';
 	}
 	for (auto& line : g_lines.segs[seg].lines) {
+		if (count == 0)
+			break;
 		if (line.tr_text.empty())
 			break;
 		dump += line.tr_text;
+		count--;
 	}
-	dump += g_lines.segs[seg].tr_tail;
+	if (count)
+		dump += g_lines.segs[seg].tr_tail;
 	auto tmp = vnsleuth_path / (g_lines.segs[seg].cache_name + ".tmp");
 	std::ofstream file(tmp, std::ios_base::trunc | std::ios_base::binary);
 	if (!file.is_open()) {
@@ -434,7 +433,6 @@ std::pair<uint, uint> load_translation(uint seg, const fs::path& path, bool veri
 				if (keep && g_lines[id].tr_text == old) {
 					kept++;
 				} else {
-					g_lines[id].seed = 0;
 					g_lines[id].tr_tts.clear();
 					keep = false;
 				}
@@ -451,7 +449,6 @@ std::pair<uint, uint> load_translation(uint seg, const fs::path& path, bool veri
 		}
 		g_lines[id2].tr_text = {};
 		g_lines[id2].tr_tts.clear();
-		g_lines[id2].seed = 0;
 	}
 
 	// Check and load what remains in the file
@@ -585,16 +582,15 @@ int main(int argc, char* argv[])
 		}
 	}
 
-	auto reload_names = [&] {
+	auto reload_names = [&]() -> bool {
 		// Load (pre-translated) names
 		std::lock_guard lock(g_mutex);
 
 		std::ifstream names(names_path);
 		if (names.is_open()) {
-			g_speakers.clear();
+			auto old = std::move(g_speakers);
 			while (std::getline(names, line, '\n')) {
-				if (line.ends_with("\r"))
-					line.erase(line.end() - 1);
+				REPLACE(line, "\r", "");
 				if (!line.ends_with(":")) {
 					// Translated name is either empty or ends with another ':'
 					std::cerr << "Failed to parse translated name string: " << line << std::endl;
@@ -603,8 +599,10 @@ int main(int argc, char* argv[])
 				if (const auto pos = line.find_first_of(":") + 1)
 					g_speakers.emplace(line.substr(0, pos), line.substr(pos));
 			}
+			return g_speakers != old;
 		} else {
 			std::cerr << "Translation names not found: " << names_path << std::endl;
+			return false;
 		}
 	};
 
@@ -620,8 +618,7 @@ int main(int argc, char* argv[])
 			if (strs.is_open()) {
 				std::size_t count = 0;
 				while (std::getline(strs, line, '\n')) {
-					if (line.ends_with("\r"))
-						line.erase(line.end() - 1);
+					REPLACE(line, "\r", "");
 					const bool a = std::count(line.cbegin(), line.cend(), ':') == 1;
 					const bool b = std::count(line.cbegin(), line.cend(), '=') == 1;
 					if (a ^ b) {
@@ -881,7 +878,7 @@ int main(int argc, char* argv[])
 
 	// List of IDs that must be processed (possibly more than once)
 	std::vector<line_id> id_queue;
-	auto flush_id_queue = [&](bool rewrite = false) -> bool {
+	auto flush_id_queue = [&]() -> bool {
 		if (g_mode == op_mode::print_only) {
 			for (auto& id : id_queue) {
 				if (static bool prompt_sent = false; !std::exchange(prompt_sent, true)) {
@@ -903,11 +900,6 @@ int main(int argc, char* argv[])
 
 		bool is_kicked = false;
 		for (auto& id : id_queue) {
-			if (rewrite) {
-				if (!translate(params, id))
-					return false;
-				continue;
-			}
 			std::unique_lock lock(g_mutex);
 			auto& line = g_lines[id];
 			if (!line.tr_text.empty()) {
@@ -954,6 +946,10 @@ int main(int argc, char* argv[])
 				lock.unlock();
 				if (!translate(params, id))
 					return false;
+				if (id.second % 30 == 30 - 1) {
+					// Autosave lines at each 30th line
+					update_segment(id.first, true, id.second + 1);
+				}
 			}
 		}
 
@@ -978,7 +974,8 @@ int main(int argc, char* argv[])
 					break;
 				}
 			}
-			flush_id_queue();
+			if (!flush_id_queue())
+				return 1;
 		}
 	}
 
@@ -991,17 +988,76 @@ int main(int argc, char* argv[])
 	// Previous non-unique lines are printed if they exactly precede unique line, otherwise wiped.
 	std::vector<std::u16string> back_buf;
 	while (!g_stop && std::getline(std::cin, line)) {
+		// Preprocess special ":" character
+		REPLACE(line, ":", "：");
 		if (g_mode == op_mode::rt_llama) {
-			if (line.empty()) {
-				// Process rewrite request
-				if (id_queue.empty() || id_queue.size() > 10 || id_queue.back() != g_history.back()) {
-					std::cerr << "Cannot process rewrite request here." << std::endl;
+			if (line.empty() || line.starts_with("\01")) {
+				// Process rewrite request: only last line is supported currently (TODO)
+				while (line.starts_with("\01")) {
+					line.erase(0, 1);
+				}
+				if (id_queue.empty() || id_queue.back() != g_history.back()) {
+					std::cerr << "Cannot process rewrite request here. Try rewinding (^B)." << std::endl;
 					continue;
 				}
-				for (auto& id : id_queue) {
-					g_lines[id].seed++;
+				if (!translate(params, g_lines.next(id_queue.back()), tr_cmd::sync))
+					return 1;
+				params.sparams.cfg_negative_prompt.clear();
+				auto& tr_text = g_lines[id_queue.back()].tr_text;
+				if (tr_text.rfind(line) + 1 > tr_text.rfind("\n" + isuffix) + 1 + isuffix.size() + !isuffix.ends_with(" "))
+					params.sparams.cfg_negative_prompt = std::move(line);
+				if (!translate(params, id_queue.back()))
+					return 1;
+				params.sparams.cfg_negative_prompt.clear();
+				continue;
+			}
+
+			if (line == "\02" || line == "\b") {
+				// Process rewind request (^B)
+				// Remove last history entry, show previous one
+				if (g_history.empty()) {
+					continue;
 				}
-				if (!flush_id_queue(true))
+				if (g_history.back().second == 0) {
+					// TODO
+					std::cerr << "Rewinding across segments is not implemented." << std::endl;
+					continue;
+				}
+
+				std::cerr << "Rewinding... " << std::endl;
+				next_id = g_history.back();
+				g_history.pop_back();
+				prev_id = g_history.back();
+				id_queue = {prev_id};
+				last_line.clear();
+				if (!translate(params, g_lines.next(next_id), tr_cmd::sync))
+					return 1;
+				if (!translate(params, {0u, 1u}, tr_cmd::eject))
+					return 1;
+				g_lines[next_id].tr_text.clear();
+				g_lines[next_id].tr_tts.clear();
+				if (!flush_id_queue())
+					return 1;
+				continue;
+			}
+
+			if (line == "\x0e") {
+				// Process forward ("next") request (^N)
+				// Proceed after last history entry
+				if (g_history.empty()) {
+					continue;
+				}
+				if (g_lines.is_last(g_history.back())) {
+					std::cerr << "Reached the end of segment." << std::endl;
+					continue;
+				}
+
+				prev_id = g_lines.next(g_history.back());
+				next_id = g_lines.next(prev_id);
+				g_history.push_back(prev_id);
+				id_queue = {prev_id};
+				last_line.clear();
+				if (!flush_id_queue())
 					return 1;
 				continue;
 			}
@@ -1055,6 +1111,10 @@ int main(int argc, char* argv[])
 					if (!id_queue.empty() && prev_id != c_bad_id && prev_id.first != id_queue.back().first) {
 						id_queue.clear();
 					}
+					for (auto& line : g_lines) {
+						// Full reset of penalization state
+						line.tr_tts.clear();
+					}
 					std::cerr << "Cache reloaded." << std::endl << std::flush;
 				} else if (kept_lines + 1) {
 					// Optimized reload
@@ -1064,6 +1124,10 @@ int main(int argc, char* argv[])
 						std::fprintf(stderr, "%s[] Reload: eject %u, keep %u\n", g_esc.reset, to_eject, kept_lines);
 					if (!translate(params, {0u, to_eject}, tr_cmd::eject))
 						return 1;
+					for (line_id kid{prev_id.first, kept_lines}; kid <= prev_id; g_lines.advance(kid)) {
+						// Add dummy to prevent context ejection to improve replayability in some cases
+						g_lines[kid].tr_tts = decltype(line_info::tr_tts)(1);
+					}
 					if (!translate(params, {next_id.first, kept_lines}, tr_cmd::reload))
 						return 1;
 				}
@@ -1078,7 +1142,7 @@ int main(int argc, char* argv[])
 					if (!translate(params, prev_id, tr_cmd::kick))
 						return 1;
 				}
-				if (!flush_id_queue(false))
+				if (!flush_id_queue())
 					return 1;
 				continue;
 			}
@@ -1354,8 +1418,16 @@ int main(int argc, char* argv[])
 						}
 					}
 				}
+				if (prev_id == c_bad_id && g_lines.is_last(g_history.back()) && g_lines.segs[next_id.first].lines[0].tr_text.empty()) {
+					// Start new segment from the start
+					std::cerr << "Unexpected jump to the middle of segment." << std::endl;
+					prev_id = g_history.back();
+					next_id = last_id;
+					next_id.second = 0;
+					continue;
+				}
 				if (prev_id == c_bad_id) {
-					std::cerr << "Unexpected jump, ignored. Could be a bug, or try to restart." << std::endl;
+					std::cerr << "Unexpected jump, ignored. Try to use ^N to finish current segment." << std::endl;
 					prev_id = g_history.back();
 					next_id = g_lines.next(prev_id);
 					break;

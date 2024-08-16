@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <bitset>
 #include <cstdint>
 #include <cstring>
@@ -19,6 +20,7 @@ using namespace std::literals;
 static_assert("か"sv == "\xE3\x81\x8B"sv, "This source file shall be compiled as UTF-8 text");
 
 using uint = unsigned;
+using ui64 = std::uint64_t;
 
 struct natural_order_less {
 	constexpr bool operator()(std::string_view a, std::string_view b) const
@@ -52,6 +54,38 @@ struct natural_order_less {
 	}
 };
 
+template <typename Char, typename Tr, typename All, typename T>
+std::basic_string<Char>& operator-=(std::basic_string<Char, Tr, All>& str, const T& tail)
+	requires(std::is_convertible_v<T, std::basic_string_view<Char, Tr>>)
+{
+	std::basic_string_view<Char, Tr> t = tail;
+	if (str.ends_with(t))
+		str.resize(str.size() - t.size());
+	return str;
+}
+
+template <typename Src, typename T, typename Char = std::decay_t<decltype(std::declval<Src>()[0])>>
+auto operator-(const Src& sv, const T& tail)
+	requires(std::is_trivial_v<Char> && std::is_standard_layout_v<Char> && std::is_constructible_v<std::basic_string_view<Char>, const Src&> &&
+			 std::is_constructible_v<std::basic_string_view<Char>, const T&>)
+{
+	std::basic_string_view<Char> s(sv);
+	std::basic_string_view<Char> t(tail);
+	if (s.ends_with(t))
+		s.remove_suffix(t.size());
+	return s;
+}
+
+template <typename Char, typename Tr, typename T>
+std::basic_string_view<Char>& operator-=(std::basic_string_view<Char, Tr>& sv, const T& tail)
+	requires(std::is_convertible_v<T, std::basic_string_view<Char, Tr>>)
+{
+	std::basic_string_view<Char, Tr> t = tail;
+	if (sv.ends_with(t))
+		sv.remove_suffix(t.size());
+	return sv;
+}
+
 // Operation mode
 inline enum class op_mode {
 	print_only = 0, // Legacy mode (passthrough)
@@ -64,9 +98,10 @@ struct line_info {
 	std::string name;		  // Character name (speaker), may be empty
 	std::string text;		  // Original text
 	std::u16string_view sq_text; // Processed text (squeezed, owned permanently by g_strings)
-	std::string tr_text;	  // Translated text (two-line format)
-	uint seed = 0;			  // Increases with each rewrite
-	std::vector<int> tr_tts;  // tr_text tokens
+	std::string tr_text;		 // Translated text (includes original line and annotations)
+	std::string pre_ann;
+	std::string post_ann;
+	std::vector<std::vector<int>> tr_tts; // tr_text tokens (only translated part)
 };
 
 struct segment_info {
@@ -161,7 +196,7 @@ inline struct loaded_lines {
 
 	struct iterator final : private line_id {
 		constexpr iterator() : line_id(c_bad_id) {}
-		constexpr iterator(line_id id) : line_id(id) {}
+		constexpr explicit iterator(line_id id) : line_id(id) {}
 
 		constexpr auto operator<=>(const iterator&) const = default;
 
@@ -174,20 +209,31 @@ inline struct loaded_lines {
 		line_id id() const { return *this; }
 	};
 
-	iterator begin() const { return {{0u, 0u}}; }
+	iterator begin() const { return iterator{{0u, 0u}}; }
 	iterator end() const noexcept { return {}; }
 } g_lines;
 
 inline loaded_lines::iterator loaded_lines::iterator::operator++(int) noexcept
 {
 	iterator r = *this;
-	g_lines.advance(*this);
+	this->operator++();
 	return r;
 }
 
 inline loaded_lines::iterator& loaded_lines::iterator::operator++() noexcept
 {
-	g_lines.advance(*this);
+	if (*this != c_bad_id) {
+		if (g_lines.is_last(*this)) {
+			this->first++;
+			this->second = 0;
+			if (this->first >= g_lines.segs.size()) {
+				this->first = -1;
+				this->second = -1;
+			}
+		} else {
+			this->second++;
+		}
+	}
 	return *this;
 }
 
@@ -224,9 +270,6 @@ inline const std::vector<std::pair<std::string, std::string>> g_default_replaces
 	{"ーーー", "ーー"}, // Reduce repetitions
 	{"ーー", "～"}, // Replace "too long" sound with ～
 	{"～～", "～"},
-	{"「…", "「"}, // Sentences starting with … might get translated as empty "..."
-	{"（…", "（"},
-	{"『…", "『"},
 	{"？？", "？"},
 	{"ぁぁ", "ぁ"},
 	{"ぃぃ", "ぃ"},
@@ -253,10 +296,11 @@ inline const std::vector<std::pair<std::string, std::string>> g_default_replaces
 inline std::vector<std::pair<std::string, std::string>> g_replaces = g_default_replaces;
 
 // Apply replace rules
-inline std::string apply_replaces(const auto& src, bool repeatable_only = false, std::size_t start = 0)
+inline std::string apply_replaces(const auto& src, bool repeatable_only, auto&& start)
 {
 	std::string out;
 	out = src;
+	std::size_t max_pos = 0;
 	for (auto& [from, to] : g_replaces) {
 		std::size_t start_pos = start;
 		std::size_t start_inc = to.rfind(from);
@@ -264,6 +308,7 @@ inline std::string apply_replaces(const auto& src, bool repeatable_only = false,
 			continue;
 		while (auto pos = out.find(from, start_pos) + 1) {
 			out.replace(pos - 1, from.size(), to);
+			max_pos = std::max(pos, max_pos);
 			if (start_inc + 1) {
 				// Perform only single replacement if `to` contains `from`
 				start_pos = pos - 1 + start_inc + from.size();
@@ -272,6 +317,8 @@ inline std::string apply_replaces(const auto& src, bool repeatable_only = false,
 			}
 		}
 	}
+	if constexpr (!std::is_const_v<std::remove_reference_t<decltype(start)>>)
+		start = std::max<std::size_t>(start, max_pos);
 	return out;
 }
 
