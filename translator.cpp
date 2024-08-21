@@ -144,33 +144,10 @@ bool translate(gpt_params& params, line_id id, tr_cmd cmd)
 		return false;
 	}
 
-	static std::uint64_t sample_count = 0;
-	static auto sample_time = 0ns;
-	static std::uint64_t batch_count = 0;
-	static auto batch_time = 0ns;
-	static auto eval_time = 0ns;
-
-	// Print some statistics
-	auto print_stats = [&]() {
-		if (decoded && batch_count && sample_count) {
-			// Time spent in sampling logic, but count is the number of resulting tokens.
-			std::cerr << "Sample speed: ";
-			std::cerr << uint(10 / (sample_time.count() / sample_count / 1e9)) / 10. << "/s" << std::endl;
-			// Time spent in batching big amount of tokens (including prompt).
-			std::cerr << "Batch speed: ";
-			std::cerr << uint(10 / (batch_time.count() / batch_count / 1e9)) / 10. << "/s (" << batch_count << " total)" << std::endl;
-			// Time spent in batching few tokens, no separate counter for eval (uses sample counter).
-			std::cerr << "Eval speed: ";
-			std::cerr << uint(10 / (eval_time.count() / sample_count / 1e9)) / 10. << "/s (" << sample_count << " total)" << std::endl;
-		}
-	};
-
 	if (cmd == tr_cmd::sync) {
 		// Abort background worker and possibly discard work
 		// Send Id to start discarding from, obviously can't use -1
 		join_worker(std::min<uint>(id.second, -2));
-		if (is_stopped())
-			print_stats();
 		return true;
 	}
 
@@ -221,6 +198,14 @@ bool translate(gpt_params& params, line_id id, tr_cmd cmd)
 	auto eject_bunch = [&](uint i) {
 		if (i > chunks.size()) {
 			// Remove all
+			// while (decoded) {
+			// 	// Rough approximation for full context reset
+			// 	g_stats->raw_discards++;
+			// 	if (chunks.back() > decoded)
+			// 		break;
+			// 	decoded -= chunks.back();
+			// 	chunks.pop_back();
+			// }
 			chunks.clear();
 			tokens.clear();
 			decoded = 0;
@@ -247,6 +232,7 @@ bool translate(gpt_params& params, line_id id, tr_cmd cmd)
 					throw std::out_of_range("eject_bunch decoded=" + std::to_string(decoded));
 			}
 			tokens.resize(tokens.size() - count);
+			g_stats->raw_discards++;
 		}
 	};
 
@@ -349,16 +335,16 @@ bool translate(gpt_params& params, line_id id, tr_cmd cmd)
 			total += bsize;
 		}
 		llama_synchronize(ctx);
+		g_stats->raw_decodes += total;
 		auto stamp1 = std::chrono::steady_clock::now();
 		if (total > 1) {
-			batch_count += total;
-			batch_time += stamp1 - stamp0;
+			g_stats->batch_count += total;
+			g_stats->batch_time += (stamp1 - stamp0).count() / 1000;
 		}
 	};
 
 	auto init_segment = [&]() -> void {
 		// Initialize segment: eject all first
-		print_stats();
 		eject_bunch(-1);
 
 		// Load full history
@@ -611,8 +597,9 @@ bool translate(gpt_params& params, line_id id, tr_cmd cmd)
 				}
 			}
 			auto token_id = llama_sampling_sample(sctx, ctx, nullptr);
+			g_stats->raw_samples++;
 			auto stamp1 = std::chrono::steady_clock::now();
-			sample_time += stamp1 - stamp0;
+			g_stats->sample_time += (stamp1 - stamp0).count() / 1000;
 			if (++pred_count > params.n_predict)
 				token_id = llama_token_nl(model); // Force newline if size exceeded
 			if (llama_token_is_eog(model, token_id))
@@ -743,8 +730,9 @@ bool translate(gpt_params& params, line_id id, tr_cmd cmd)
 				return false;
 			}
 			llama_synchronize(ctx);
+			g_stats->raw_decodes += to_decode;
 			stamp1 = std::chrono::steady_clock::now();
-			eval_time += stamp1 - stamp0;
+			g_stats->eval_time += (stamp1 - stamp0).count() / 1000;
 			decoded += to_decode;
 			if (chunks.empty())
 				throw std::out_of_range("chunks.empty()");
@@ -762,7 +750,7 @@ bool translate(gpt_params& params, line_id id, tr_cmd cmd)
 				}
 			}
 		}
-		sample_count += pred_count;
+		g_stats->sample_count += pred_count;
 		if (is_stopped() && !llama_out.ends_with("\n") && std::this_thread::get_id() == s_main_tid)
 			std::cout << std::endl; // Stop current line
 		if (g_mode == op_mode::rt_llama && std::this_thread::get_id() == s_main_tid)
@@ -790,6 +778,7 @@ bool translate(gpt_params& params, line_id id, tr_cmd cmd)
 		line.tr_text += line.post_ann;
 		line.tr_text += isuffix;
 		line.tr_text += llama_out;
+		g_stats->raw_translates++;
 	}
 
 	if (!is_stopped() && std::this_thread::get_id() == s_main_tid && g_mode == op_mode::rt_llama && id != c_bad_id) {

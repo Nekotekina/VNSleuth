@@ -566,6 +566,24 @@ int main(int argc, char* argv[])
 		return 1;
 	}
 
+	// Open stat file for writing via memory map
+	std::shared_ptr<void> stats_ptr;
+	int stats_fd = open((vnsleuth_path / "__vnsleuth_stats").c_str(), O_CREAT | O_RDWR, 0666);
+	if (stats_fd != -1 && ftruncate(stats_fd, alignof(vnsleuth_stats)) != -1) {
+		stats_ptr = std::shared_ptr<void>(mmap(0, alignof(vnsleuth_stats), PROT_READ | PROT_WRITE, MAP_SHARED, stats_fd, 0), [=](void* ptr) {
+			munmap(ptr, alignof(vnsleuth_stats));
+			close(stats_fd);
+		});
+	} else {
+		perror("Failed to create __vnsleuth_stats");
+		stats_ptr = std::make_shared<vnsleuth_stats>();
+	}
+	g_stats = static_cast<vnsleuth_stats*>(stats_ptr.get());
+	if (g_mode == op_mode::rt_llama) {
+		ui64 z = 0;
+		g_stats->start_time.compare_exchange_strong(z, std::time(nullptr));
+	}
+
 	if (prompt_path.empty() || !fs::is_regular_file(prompt_path)) {
 		std::cerr << "Translation prompt not found: " << prompt_path << std::endl;
 		if (!prompt_path.empty()) {
@@ -939,6 +957,9 @@ int main(int argc, char* argv[])
 					if (!translate(params, line_id{id.first, 0u - 1}, tr_cmd::sync))
 						return false;
 				}
+				if (g_mode == op_mode::rt_llama && g_history.back() == id) {
+					g_stats->raw_accepts++;
+				}
 			} else if (g_mode == op_mode::rt_cached) {
 				std::cerr << "Error: Translation cache is incomplete" << std::endl;
 				break;
@@ -946,6 +967,7 @@ int main(int argc, char* argv[])
 				lock.unlock();
 				if (!translate(params, id))
 					return false;
+				g_stats->raw_accepts++;
 				if (id.second % 30 == 30 - 1) {
 					// Autosave lines at each 30th line
 					update_segment(id.first, true, id.second + 1);
@@ -979,6 +1001,26 @@ int main(int argc, char* argv[])
 		}
 	}
 
+	auto last_input_time = std::chrono::steady_clock::now();
+	auto update_input_time = [&]() {
+		if (g_mode != op_mode::rt_llama) {
+			return;
+		}
+		g_stats->last_time = std::time(nullptr);
+		auto _now = std::chrono::steady_clock::now();
+		auto diff = std::chrono::duration_cast<std::chrono::milliseconds>(_now - last_input_time);
+		if (diff < 1min) {
+			// Approximately actual reading time
+			g_stats->rt_reading_ms += diff.count();
+		} else {
+			// Otherwise, probably AFK time
+			auto mins = std::chrono::duration_cast<std::chrono::minutes>(_now - last_input_time);
+			uint pos = 31 - std::countl_zero<uint>(mins.count());
+			g_stats->rt_afk_ms[pos] += diff.count();
+		}
+		last_input_time = _now;
+	};
+
 	// Setup Ctrl+C handler
 	signal(SIGINT, sigh);
 
@@ -988,6 +1030,7 @@ int main(int argc, char* argv[])
 	// Previous non-unique lines are printed if they exactly precede unique line, otherwise wiped.
 	std::vector<std::u16string> back_buf;
 	while (!g_stop && std::getline(std::cin, line)) {
+		update_input_time();
 		// Preprocess special ":" character
 		REPLACE(line, ":", "：");
 		if (g_mode == op_mode::rt_llama) {
@@ -1009,6 +1052,7 @@ int main(int argc, char* argv[])
 				if (!translate(params, id_queue.back()))
 					return 1;
 				params.sparams.cfg_negative_prompt.clear();
+				g_stats->rt_rewrites++;
 				continue;
 			}
 
@@ -1144,6 +1188,7 @@ int main(int argc, char* argv[])
 				}
 				if (!flush_id_queue())
 					return 1;
+				g_stats->rt_reloads++;
 				continue;
 			}
 
@@ -1458,6 +1503,7 @@ int main(int argc, char* argv[])
 			return 1;
 	}
 
+	update_input_time();
 	if (g_mode == op_mode::rt_llama && !g_history.empty()) {
 		// Stop background thread and discard
 		if (!translate(params, g_lines.next(g_history.back()), tr_cmd::sync))
@@ -1465,6 +1511,48 @@ int main(int argc, char* argv[])
 		// Save pending translations
 		if (!update_segment(g_history.back().first))
 			return 1;
+	}
+
+	// Print some stats
+	if (g_stats->last_time.load()) {
+		auto total_time = g_stats->last_time.load() - g_stats->start_time.load();
+		auto read_time0 = g_stats->rt_reading_ms.load() / 1000;
+		auto afk_time = std::accumulate(std::begin(g_stats->rt_afk_ms), std::end(g_stats->rt_afk_ms), ui64(0)) / 1000;
+		std::cerr << "Elapsed real: " << total_time / 36 / 100. << "h" << std::endl;
+		std::cerr << "Reading time: " << read_time0 / 36 / 100. << "h (";
+		std::cerr << 10000 * read_time0 / (1 + read_time0 + afk_time) / 100. << "%)" << std::endl;
+		std::cerr << "AFK time: " << afk_time / 36 / 100. << "h" << std::endl;
+		// Time spent in sampling logic, but count is the number of resulting tokens.
+		if (auto count = g_stats->raw_samples.load()) {
+			std::cerr << "Sample speed: ";
+			std::cerr << uint(10 / (g_stats->sample_time.load() / count / 1e6)) / 10. << "/s (raw: ";
+			std::cerr << count << ")" << std::endl;
+		}
+		// Time spent in batching big amount of tokens (including prompt).
+		if (auto count = g_stats->batch_count.load()) {
+			std::cerr << "Batch speed: ";
+			std::cerr << uint(10 / (g_stats->batch_time.load() / count / 1e6)) / 10. << "/s (total: ";
+			std::cerr << count << ")" << std::endl;
+		}
+		// Time spent in batching few tokens, no separate counter for eval (uses sample counter).
+		if (auto count = g_stats->sample_count.load()) {
+			std::cerr << "Eval speed: ";
+			std::cerr << uint(10 / (g_stats->eval_time.load() / count / 1e6)) / 10. << "/s (total: ";
+			std::cerr << count << ")" << std::endl;
+		}
+		ui64 tr_count = 0;
+		for (auto& line : g_lines) {
+			if (!line.tr_text.empty())
+				tr_count++;
+		}
+		std::cerr << "Translated: " << tr_count << "/" << g_lines.count_lines();
+		std::cerr << " (" << 100 * read_time0 / tr_count / 100. << "s/line)" << std::endl;
+		if (auto count = g_stats->raw_translates.load()) {
+			std::cerr << "Attempts: " << count;
+			auto acpt = g_stats->raw_accepts.load() * 10000 / count / 100.;
+			auto disc = g_stats->raw_discards.load() * 10000 / count / 100.;
+			std::cerr << " (accept " << acpt << "%; discard " << disc << "%)" << std::endl;
+		}
 	}
 
 	if (g_stop)

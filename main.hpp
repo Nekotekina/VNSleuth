@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <bitset>
+#include <chrono>
 #include <cstdint>
 #include <cstring>
 #include <map>
@@ -342,6 +343,33 @@ enum class tr_cmd {
 
 // Obvious.
 bool translate(struct gpt_params& params, line_id id, tr_cmd cmd = tr_cmd::translate);
+
+struct alignas(4096) vnsleuth_stats {
+	std::atomic<ui64> start_time;
+	std::atomic<ui64> last_time;
+
+	std::atomic<ui64> rt_reading_ms; // Approximate user time spent reading-translating (in ms)
+	std::atomic<ui64> rt_afk_ms[31]; // Big AFK timespans are added here depending on log2(duration)
+	std::atomic<ui64> rt_rewrites;	 // Possibly indicates the amount of automated edits
+	std::atomic<ui64> rt_reloads;	 // Possibly indicates the amount of manual edits
+
+	std::atomic<ui64> raw_translates; // Raw translation count
+	std::atomic<ui64> raw_accepts;	  // +1 when next line in history is already translated in background
+	std::atomic<ui64> raw_discards;	  // Raw discard count
+	std::atomic<ui64> raw_samples;	  // Raw sample count
+	std::atomic<ui64> raw_decodes;	  // Raw decoded count
+	std::atomic<ui64> sample_count;
+	std::atomic<ui64> sample_time; // In µs
+	std::atomic<ui64> batch_count;
+	std::atomic<ui64> batch_time; // In µs
+	std::atomic<ui64> eval_time;  // In µs
+};
+
+static_assert(std::is_trivially_copyable_v<vnsleuth_stats>);
+static_assert(alignof(vnsleuth_stats) >= sizeof(vnsleuth_stats));
+
+// Points to a memory-mapped file
+inline vnsleuth_stats* g_stats{};
 
 // Terminal colors
 inline struct escape_sequences {
