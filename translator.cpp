@@ -3,6 +3,7 @@
 #include "main.hpp"
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <deque>
 #include <mutex>
 #include <thread>
@@ -94,6 +95,7 @@ bool translate(gpt_params& params, line_id id, tr_cmd cmd)
 	static const auto s_main_tid = std::this_thread::get_id();
 	static std::atomic<uint> stop_sig = -1; // stop signal for thread, new id.second is sent
 	static std::atomic<uint> work_res = 0;	// number of translated lines in segment, done by worker
+	static std::condition_variable work_cv;
 	static std::thread worker;
 
 	static auto is_stopped = []() -> bool {
@@ -104,8 +106,8 @@ bool translate(gpt_params& params, line_id id, tr_cmd cmd)
 
 	static auto join_worker = [](uint val) {
 		if (worker.joinable()) {
-			stop_sig = val;
-			stop_sig.notify_all();
+			std::lock_guard{g_mutex}, stop_sig = val;
+			work_cv.notify_all();
 			worker.join();
 		}
 	};
@@ -159,7 +161,8 @@ bool translate(gpt_params& params, line_id id, tr_cmd cmd)
 			uint rd_lines = id.second + 1;
 			// Compare translated count with the number of read lines
 			if (tr_lines > rd_lines) {
-				// Don't touch worker
+				// Only notify worker
+				work_cv.notify_all();
 				return true;
 			} else if (tr_lines != rd_lines) {
 				std::fprintf(stderr, "%sError: Kicked from untranslated line: %u<%u\n", g_esc.reset, tr_lines, rd_lines);
@@ -172,7 +175,7 @@ bool translate(gpt_params& params, line_id id, tr_cmd cmd)
 	}
 
 	// Remove first message block (returns number of tokens to erase)
-	auto eject_first = [&]() -> uint {
+	static auto eject_first = [&params]() -> uint {
 		if (chunks.empty()) {
 			return 0;
 		}
@@ -195,7 +198,7 @@ bool translate(gpt_params& params, line_id id, tr_cmd cmd)
 	};
 
 	// Remove last message block(s)
-	auto eject_bunch = [&](uint i) {
+	static auto eject_bunch = [&params](uint i) {
 		if (i > chunks.size()) {
 			// Remove all
 			// while (decoded) {
@@ -236,10 +239,10 @@ bool translate(gpt_params& params, line_id id, tr_cmd cmd)
 		}
 	};
 
-	// Eject old translations if necessary keeping only 75% of the context full (TODO)
-	auto eject_start = [&]() -> bool {
+	// Eject old translations if necessary keeping only 7/8 of the context full (TODO)
+	static auto eject_start = [&params](uint ahead = 0) -> bool {
 		std::size_t count = 0;
-		while (tokens.size() - count + params.n_predict > params.n_ctx * 3 / 4 - 1u) {
+		while (tokens.size() - ahead - count + params.n_predict > params.n_ctx * 7 / 8 - 1u) {
 			if (chunks.empty()) {
 				std::cerr << "Prompt too big or context is too small" << std::endl;
 				return false;
@@ -252,9 +255,9 @@ bool translate(gpt_params& params, line_id id, tr_cmd cmd)
 	};
 
 	// Tokenize line and add to the tokens
-	auto push_str = [&](const std::string& text) -> uint {
+	static auto push_str = [&params](const std::string& text, bool spec = false) -> uint {
 		uint r = 0;
-		auto tt = llama_tokenize(model, text, false);
+		auto tt = llama_tokenize(model, text, false, spec);
 		if (params.verbosity && !tt.empty())
 			std::fprintf(stderr, "%s[tokens:%zu] push %zu tokens: '%s'\n", g_esc.reset, tokens.size(), tt.size(), text.c_str());
 		for (auto& t : tt) {
@@ -266,7 +269,7 @@ bool translate(gpt_params& params, line_id id, tr_cmd cmd)
 	};
 
 	// Tokenize tr_text from id
-	auto push_id = [&](line_id id) {
+	static auto push_id = [&params](line_id id) {
 		auto tr_text = std::string_view(g_lines[id].tr_text);
 		auto spos = tr_text.find("\n" + isuffix) + 1;
 		if (!spos) {
@@ -313,7 +316,7 @@ bool translate(gpt_params& params, line_id id, tr_cmd cmd)
 			throw std::runtime_error("Line too long: " + g_lines[id].tr_text);
 	};
 
-	auto decode = [&]() -> void {
+	static auto decode = [&params]() -> void {
 		if (params.verbosity) {
 			std::cerr << "Decoding:" << g_esc.buf;
 			for (auto it = tokens.end() - std::min<uint>(tokens.size(), 300); it != tokens.end(); it++) {
@@ -343,7 +346,7 @@ bool translate(gpt_params& params, line_id id, tr_cmd cmd)
 		}
 	};
 
-	auto init_segment = [&]() -> void {
+	static auto init_segment = [&params]() -> void {
 		// Initialize segment: eject all first
 		eject_bunch(-1);
 
@@ -366,7 +369,7 @@ bool translate(gpt_params& params, line_id id, tr_cmd cmd)
 		}
 	};
 
-	auto add_tail_finalize = [&]() -> void {
+	auto add_tail_finalize = [id, &params]() -> void {
 		if (segment + 1) {
 			auto& tail = g_lines.segs[segment].tr_tail;
 			if (id.second == 0 && !g_lines.segs[segment].lines.back().tr_text.empty()) {
@@ -553,7 +556,6 @@ bool translate(gpt_params& params, line_id id, tr_cmd cmd)
 		const auto replaces = make_name_replaces(line.text);
 		std::size_t last_neg = spker.size();
 		std::size_t last_suf = llama_out.size();
-		std::size_t last_rep = llama_out.size();
 		while (!is_stopped() && !llama_out.ends_with("\n")) {
 			// Predict next token
 			auto stamp0 = std::chrono::steady_clock::now();
@@ -642,8 +644,8 @@ bool translate(gpt_params& params, line_id id, tr_cmd cmd)
 				}
 			}
 			if (!spker.empty() || line.name.empty()) {
-				// Perform limited replaces (only repeatable ones: TODO)
-				auto fixed = apply_replaces(llama_out, true, last_rep);
+				// TODO: implement separate replace system whith takes original text into account
+				auto fixed = llama_out;
 				// Also apply "neg" as a replacement
 				if (auto nf = fixed.find(neg, last_neg); !neg.empty() && nf + 1) {
 					// Completely cut the continuation
@@ -796,27 +798,57 @@ bool translate(gpt_params& params, line_id id, tr_cmd cmd)
 		if (!g_lines.segs[id.first].tr_tail.empty())
 			return true;
 
-		// Make some space
-		if (!eject_start())
-			return false;
-
 		stop_sig = -1;
 		work_res = id.second + 1;
 		worker = std::thread([=, &params] {
 			auto start = g_lines.next(id);
 			auto next = start;
+			auto last = id;
+			for (int i = 0; i < params.n_draft; i++) {
+				last.second++;
+				if (g_lines.is_last(last))
+					break;
+			}
+			uint ahead = 0;
 			if (params.verbosity)
 				std::fprintf(stderr, "%s[id:%u:%u] Thread entry\n", g_esc.reset, next.first, next.second);
-			while (!is_stopped() && next != c_bad_id && translate(params, next, tr_cmd::translate)) {
-				work_res++;
-				g_lines.advance(next);
+			while (!is_stopped() && next != c_bad_id) {
+				if (next <= last) {
+					// Eject some context but take ahead amount into account
+					if (!eject_start(std::accumulate(chunks.rbegin(), chunks.rbegin() + ahead, 0u)))
+						break;
+					if (!translate(params, next, tr_cmd::translate)) {
+						// No space left in context
+						last = next;
+						last.second--;
+						continue;
+					}
+					work_res++;
+					g_lines.advance(next);
+					ahead += 1;
+					continue;
+				}
+				std::unique_lock lock(g_mutex);
+				while (!is_stopped() && next > last) {
+					ahead = last.second - g_history.back().second;
+					if (ahead > params.n_draft + 0u)
+						throw std::runtime_error("Unexpected ahead: " + std::to_string(ahead));
+					for (int i = 0; i < params.n_draft; i++) {
+						if (ahead + i < params.n_draft + 0u) {
+							last.second++;
+							if (g_lines.is_last(last))
+								break;
+						} else
+							break;
+					}
+					work_cv.wait(lock);
+				}
 			}
 			// Wait for thread's destiny instead of terminating it immediately
+			std::unique_lock lock(g_mutex);
 			while (stop_sig == 0u - 1)
-				stop_sig.wait(-1);
+				work_cv.wait(lock);
 			// Discard translations which were done in the background
-			std::lock_guard lock(g_mutex);
-
 			bool msg = false;
 			uint from = stop_sig.load();
 			while (start != c_bad_id && !g_lines[start].tr_text.empty()) {

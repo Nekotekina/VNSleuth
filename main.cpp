@@ -502,6 +502,7 @@ int main(int argc, char* argv[])
 	params.sparams.penalty_last_n = 3;
 	params.sparams.penalty_repeat = 1.1;
 	params.model = ".";
+	params.n_draft = 6; // Used by background thread, number of lines to translate ahead of time
 
 	// Basic param check
 	std::string dir_name = argv[1];
@@ -928,6 +929,7 @@ int main(int argc, char* argv[])
 				if (!out.starts_with(real_iprefix)) {
 					if (auto pref_pos = out.find(alt_iprefix) + 1) {
 						out.erase(pref_pos, alt_iprefix.size() - 1);
+						out.replace(out.find(line.text, pref_pos), line.text.size(), apply_replaces(line.text, false, 0));
 						out.insert(0, g_esc.orig);
 					} else {
 						std::cerr << iprefix << " not found in translation cache." << std::endl;
@@ -935,6 +937,7 @@ int main(int argc, char* argv[])
 					}
 				} else {
 					out.replace(0, iprefix.size(), g_esc.orig);
+					out.replace(out.find(line.text), line.text.size(), apply_replaces(line.text, false, 0));
 				}
 
 				static const auto real_isuffix = "\n" + isuffix + (isuffix.ends_with(" ") ? "" : " ");
@@ -968,10 +971,10 @@ int main(int argc, char* argv[])
 				if (!translate(params, id))
 					return false;
 				g_stats->raw_accepts++;
-				if (id.second % 30 == 30 - 1) {
-					// Autosave lines at each 30th line
-					update_segment(id.first, true, id.second + 1);
-				}
+			}
+			if (g_mode == op_mode::rt_llama && id == g_history.back() && id.second % 30 == 29) {
+				// Autosave lines at each 30th line
+				update_segment(id.first, true, id.second + 1);
 			}
 		}
 
@@ -1154,10 +1157,6 @@ int main(int argc, char* argv[])
 						return 1;
 					if (!id_queue.empty() && prev_id != c_bad_id && prev_id.first != id_queue.back().first) {
 						id_queue.clear();
-					}
-					for (auto& line : g_lines) {
-						// Full reset of penalization state
-						line.tr_tts.clear();
 					}
 					std::cerr << "Cache reloaded." << std::endl << std::flush;
 				} else if (kept_lines + 1) {

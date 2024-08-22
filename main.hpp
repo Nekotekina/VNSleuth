@@ -327,7 +327,7 @@ inline std::string apply_replaces(const auto& src, bool repeatable_only, auto&& 
 inline std::vector<line_id> g_history;
 
 // Global mutex
-inline std::shared_mutex g_mutex;
+inline std::mutex g_mutex;
 
 // Remove all repeating characters in line
 std::u16string squeeze_line(const std::string& line);
