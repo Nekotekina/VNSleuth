@@ -280,10 +280,10 @@ struct parser_base2 : protected parser_base {
 	}
 
 	// For failure
-	parser_base& null_dst(bool full)
+	parser_base& null_dst(bool full, std::string error = "")
 	{
 		m_dst.~owning_parser();
-		new (&m_dst) owning_parser(0);
+		new (&m_dst) owning_parser(std::move(error));
 		if (!full) {
 			m_inf.~owning_parser();
 			new (&m_inf) owning_parser(8);

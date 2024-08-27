@@ -213,9 +213,11 @@ int main(int argc, char* argv[])
 		if (poll(&ifd, 1, 0) > 0) {
 			char c{};
 			if (read(STDIN_FILENO, &c, 1) == 1) {
-				// Replace "dangerous" Reload command with safer Edit
+				// Replace "dangerous" commands
 				if (c == 'r')
 					c = 'e';
+				if (c == 'f')
+					continue;
 				if (c >= 'a' && c <= 'z') {
 					// Convert lowercase letters
 					c -= 'a';

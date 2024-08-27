@@ -552,9 +552,9 @@ int main(int argc, char* argv[])
 		names_path = path / "__vnsleuth_names.txt";
 		for (const auto& entry : fs::recursive_directory_iterator(path.parent_path(), fs::directory_options::follow_directory_symlink)) {
 			if (entry.is_regular_file()) {
-				// Skip special files
-				const auto fname = entry.path().filename().string();
-				if (fname.starts_with("__vnsleuth_") && fname.ends_with(".txt"))
+				// Skip __vnsleuth directory entirely
+				const auto fname = entry.path().string();
+				if (fname.starts_with(vnsleuth_path.c_str()))
 					continue;
 				// Check file size
 				const auto size = entry.file_size();
@@ -1095,6 +1095,8 @@ int main(int argc, char* argv[])
 					continue;
 				}
 				if (g_lines.is_last(g_history.back())) {
+					prev_id = g_history.back();
+					next_id = c_bad_id;
 					std::cerr << "Reached the end of segment." << std::endl;
 					continue;
 				}
@@ -1105,6 +1107,32 @@ int main(int argc, char* argv[])
 				id_queue = {prev_id};
 				last_line.clear();
 				if (!flush_id_queue())
+					return 1;
+				continue;
+			}
+
+			if (line == "\06") {
+				// Process finalize request (^F)
+				if (g_history.empty() || prev_id != g_history.back() || !g_lines.is_last(prev_id)) {
+					std::cerr << "Must be at the end of segment, try ^N." << std::endl;
+					continue;
+				}
+
+				if (!translate(params, c_bad_id, tr_cmd::sync))
+					return 1;
+				if (!g_lines.segs[prev_id.first].tr_tail.empty()) {
+					std::cerr << "Segment already finalized, try manual fix." << std::endl;
+					continue;
+				}
+
+				// Doesn't really matter what to add here, since translator won't see it
+				g_lines.segs[prev_id.first].tr_tail = "<END>\n";
+				update_segment(prev_id.first);
+				prev_id = c_bad_id;
+				next_id = g_history.front();
+				id_queue.clear();
+				g_history.clear();
+				if (!translate(params, c_bad_id, tr_cmd::reload))
 					return 1;
 				continue;
 			}
@@ -1379,8 +1407,25 @@ int main(int argc, char* argv[])
 
 		// Handle forward jump within segment (enqueue all preceding lines)
 		if (g_history.empty()) {
-			if (next_id != c_bad_id)
-				next_id.second = 0;
+			if (next_id != c_bad_id && g_mode == op_mode::rt_llama) {
+				// Try to load history from arbitrary location
+				if (next_id.second) {
+					prev_id = next_id;
+					prev_id.second--;
+					if (!g_lines[prev_id].tr_text.empty())
+						load_history(prev_id);
+					else {
+						// Fallback
+						prev_id = c_bad_id;
+						next_id.second = 0;
+					}
+				} else if (auto& seg = g_lines.segs[next_id.first]; !seg.prev_segs.empty()) {
+					auto seg_id = g_lines.segs_by_name[seg.prev_segs.back()];
+					prev_id.first = seg_id;
+					prev_id.second = g_lines.segs[seg_id].lines.size() - 1;
+					load_history(prev_id);
+				}
+			}
 		} else if (g_history.back().first == last_id.first && last_id.second > g_history.back().second + 1) {
 			next_id.first = last_id.first;
 			next_id.second = g_history.back().second + 1;

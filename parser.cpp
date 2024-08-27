@@ -3,6 +3,7 @@
 #include "tools/iconv.hpp"
 #include "tools/tiny_sha1.hpp"
 #include <bit>
+#include <fstream>
 #include <functional>
 #include <iostream>
 #include <regex>
@@ -203,7 +204,8 @@ void script_parser::read_segments(const std::string& name)
 	if (!is_text && !sorted_archive.empty()) {
 		for (auto& [n, f] : sorted_archive) {
 			script_parser parser(f(true, nullptr).data);
-			//std::ofstream("__vnsleuth_dump_" + n, std::ios::trunc | std::ios::binary).write(parser.data.data(), parser.data.size());
+			//if (g_mode == op_mode::print_info)
+			//	std::ofstream("__vnsleuth/__vnsleuth_dump_" + n, std::ios::trunc | std::ios::binary).write(parser.data.data(), parser.data.size());
 			parser.read_segments(n);
 		}
 		return;

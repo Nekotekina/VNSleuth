@@ -72,8 +72,8 @@ struct HuffmanNode {
 parser_base& parser_arc_dsc::parse(bool full, parser_base* opt_dst)
 {
 	auto [dst_size, dec_count, ok] = read_le<4u, 4u>(0x14);
-	if (!ok || !data.starts_with("DSC FORMAT 1.00\0") || dst_size <= 512 + 0x20) [[unlikely]]
-		return null_dst(full);
+	if (!ok || !data.starts_with("DSC FORMAT 1.00\0") || data.size() <= 512 + 0x20) [[unlikely]]
+		return null_dst(full, "DSC format\n");
 	auto [dst, skip] = get_dst(opt_dst, dst_size, full);
 	if (skip)
 		return dst;
@@ -134,7 +134,7 @@ parser_base& parser_arc_dsc::parse(bool full, parser_base* opt_dst)
 			uint node_index = 0;
 			do {
 				if (bits.is_eos()) [[unlikely]]
-					return null_dst(full);
+					return null_dst(full, "bits.is_eos\n");
 				uint bit = bits.get_bit();
 				if (0 == bit)
 					node_index = hnodes[node_index].LeftChildIndex;
@@ -145,17 +145,17 @@ parser_base& parser_arc_dsc::parse(bool full, parser_base* opt_dst)
 			uint code = hnodes[node_index].Code;
 			if (code >= 256) {
 				if (bits.is_eos(12)) [[unlikely]]
-					return null_dst(full);
+					return null_dst(full, "bits.is_eos\n");
 				uint offset = bits.get_bits(12) + 2;
 				uint count = (code & 0xff) + 2;
 				if (dst_ptr < offset || dst_ptr + count > dst_size) [[unlikely]]
-					return null_dst(full);
+					return null_dst(full, "dst_ptr\n");
 				if (!dst.copy_overlapped(dst_ptr - offset, dst_ptr, count))
-					return null_dst(full);
+					return null_dst(full, "copy_overlapped'n");
 				dst_ptr += count;
 			} else {
 				if (!dst.write_le<1u>(dst_ptr, code)) [[unlikely]]
-					return null_dst(full);
+					return null_dst(full, "write\n");
 			}
 		}
 	}

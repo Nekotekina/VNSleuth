@@ -36,7 +36,7 @@ decltype(g_replaces) make_name_replaces(std::string_view text)
 
 	for (const auto& [orig_name, tr_name] : g_speakers) {
 		// Filter non-names (TODO: this should be much more complicated)
-		if (tr_name.find_first_of("?& ") + 1)
+		if (tr_name.empty() || tr_name.find_first_of("?& ") + 1)
 			continue;
 		std::string_view name = orig_name;
 		name -= ":";
