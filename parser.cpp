@@ -219,7 +219,8 @@ void script_parser::read_segments(const std::string& name)
 		off = (add_off += 0x1c); // Offset added to PUSH opcode string location, and first OP offset
 		std::vector<std::string> stack;
 		err = [&] {
-			std::cerr << "Format: Buriko/ETH" << std::endl;
+			std::cerr << "Name: " << name << std::endl;
+			std::cerr << "Format: Buriko/ETH v1.00" << std::endl;
 			std::cerr << "Offset: " << off << std::endl;
 			std::cerr << "Opcode: " << op << std::endl;
 			std::cerr << "Stack: " << stack.size() << std::endl;
@@ -280,7 +281,7 @@ void script_parser::read_segments(const std::string& name)
 					}
 				}
 			}
-			if (op == 0x140 && !stack.empty()) {
+			if ((op == 0x140 || op == 0x143) && !stack.empty()) {
 				// PRINT
 				std::string name, text, textfix;
 				text = stack.back();
@@ -297,9 +298,112 @@ void script_parser::read_segments(const std::string& name)
 				// Add normal line
 				add_line(0, std::move(name), std::move(textfix));
 			}
+			if (op == 0x14b && stack.size() == 2) {
+				// Furigana
+				add_ruby(stack[0], stack[1]);
+			}
 
 			stack.clear();
 			continue;
 		}
+		return;
+	}
+
+	// Attempt parsing and return false if something goes wrong
+	auto try_parse_eth_v1 = [&]() -> bool {
+		std::size_t off = 0, off_max = this->data.size();
+		std::uint32_t op = 0, choice = 0;
+		std::vector<std::string> stack;
+		err = [&] {
+			std::cerr << "Name: " << name << std::endl;
+			std::cerr << "Format: Buriko/ETH v1 headerless" << std::endl;
+			std::cerr << "Offset: " << off << std::endl;
+			std::cerr << "Opcode: " << op << std::endl;
+			std::cerr << "Stack: " << stack.size() << std::endl;
+			for (auto& s : stack)
+				std::cerr << s << std::endl;
+			std::cerr << "Error: ";
+			return std::ref(std::cerr);
+		};
+		while (off < off_max) {
+			if (!read_le(op, off))
+				return false;
+			switch (op) {
+			case 0:
+			case 1:
+			case 2:
+			case 8:
+			case 9:
+			case 0xa:
+			case 0x17:
+			case 0x19:
+			case 0x3f:
+			case 0x7e:
+				off += 4; // Skip args
+				continue;
+			case 0x7f:
+				off += 8; // Skip args
+				continue;
+			case 0x7b:
+				off += 12; // Skip args
+				continue;
+			default:
+				break;
+			}
+			if (op == 0x1b) {
+				// Exit?
+				//break;
+			}
+			if (op == 3) {
+				// PUSH
+				auto [addr, ok] = read_le<4u>(off);
+				if (!ok)
+					return false;
+				auto [str, ok2] = read_le<0>(+addr);
+				if (!ok2)
+					return false;
+				stack.emplace_back(from_sjis(str));
+				if (off_max > addr)
+					off_max = addr;
+				continue;
+			}
+			if ((op == 0x140 || op == 0x145) && !stack.empty()) {
+				// PRINT
+				if (stack.size() > 2)
+					err() << "PRINT: too big stack (parse error)" << std::endl;
+				std::string name, text;
+				text = std::move(stack[0]);
+				if (stack.size() > 1) {
+					name = std::move(stack[1]);
+				}
+
+				// Add normal line
+				add_line(0, std::move(name), std::move(text));
+				choice = 0;
+				stack.clear();
+			}
+			if ((op == 0x14b || op == 0x14e) && stack.size() == 2) {
+				// Furigana
+				add_ruby(stack[0], stack[1]);
+				stack.clear();
+			}
+
+			if (op >= 0x500) {
+				return false;
+			}
+			//if (!stack.empty() && op != 437)
+			//	err() << "Stack leftovers" << std::endl;
+			stack.clear();
+			continue;
+		}
+		if (off > off_max)
+			return false;
+		return true;
+	};
+	if (auto [first_op, ok] = read_le<4u>(0); ok && first_op < 0x500 /* TODO: what is max op value? */) {
+		add_segment(name, data);
+		if (try_parse_eth_v1())
+			return;
+		g_lines.segs.back().lines.clear();
 	}
 }

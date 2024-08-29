@@ -3,6 +3,7 @@
 #include "llama.h"
 #include "parser.hpp"
 #include <algorithm>
+#include <bit>
 #include <chrono>
 #include <csignal>
 #include <cstdint>
