@@ -666,6 +666,70 @@ int main(int argc, char* argv[])
 		return 0;
 	};
 
+	// Analyze ExHIBIT script files to obtain "encryption" key
+	{
+		std::vector<std::string> to_analyze;
+		for (auto& [name, size] : file_list) {
+			if (name.ends_with(".rld")) {
+				std::string data;
+				data.resize(size > 0xffd0 ? 0xffd0 : size);
+				std::ifstream f(name, std::ios::binary);
+				if (f.is_open() && f.read(data.data(), data.size())) {
+					if (data.starts_with("\0DLR"sv)) {
+						to_analyze.emplace_back(std::move(data));
+					}
+				} else {
+					std::cerr << "Failed to read file: " << name << std::endl;
+					return 1;
+				}
+			}
+		}
+
+		std::array<uint, 1024 / 4> _key;
+		std::bitset<1024 / 4> conflict{};
+		for (uint i = 0; i < _key.size(); i++) {
+			uint bytes = 0;
+			// Raw bytes -> counter
+			std::unordered_map<uint, uint> stats;
+			for (auto& s : to_analyze) {
+				for (uint j = i * 4 + 16; j + 3 < s.size(); j += sizeof(_key)) {
+					std::memcpy(&bytes, s.data() + j, 4);
+					stats[bytes]++;
+				}
+			}
+			uint _max = 0;
+			for (auto& [seq, count] : stats) {
+				if (count > _max) {
+					bytes = seq;
+					_max = count;
+				}
+			}
+			uint sure = -1;
+			for (auto& [seq, count] : stats) {
+				if (count < _max)
+					sure = std::min(sure, _max - count);
+				if (count == _max && seq != bytes) {
+					conflict.set(i);
+					sure = 0;
+				}
+			}
+			if (sure < 10) {
+				std::cerr << "ExHIBIT: Key is ambiguous at position " << i * 4 << "+16" << std::endl;
+				conflict.set(i);
+			} else {
+				_key[i] = bytes;
+			}
+		}
+		if (conflict.none() && _key.size() - std::count(_key.begin(), _key.end(), 0)) {
+			std::fprintf(stderr, "ExHIBIT: key found: ");
+			for (auto& key : _key)
+				std::fprintf(stderr, "%08x", __builtin_bswap32(key));
+			std::fprintf(stderr, "\n");
+			extern char g_exhibit_key[1024];
+			std::memcpy(g_exhibit_key, _key.data(), sizeof(g_exhibit_key));
+		}
+	}
+
 	for (auto& [fname, fsize] : file_list) {
 		const int fd = open(fname.c_str(), O_RDONLY);
 		if (fd >= 0) {

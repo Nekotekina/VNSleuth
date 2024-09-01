@@ -97,46 +97,60 @@ struct parser_base {
 
 	explicit parser_base(std::string_view data) : data(data) {}
 
+	struct memcpy_reader {
+		void operator()(std::size_t /* offset */, char* dst, const char* src, std::size_t count) const
+		{
+			// offset is unused here
+			std::memcpy(dst, src, count);
+		}
+	};
+
 	// Read little-endian value
-	template <typename T, typename Off>
-	bool read_le(T& dst, Off&& pos) const noexcept
+	template <typename T, typename Off, typename Rdr = memcpy_reader>
+	bool read_le(T& dst, Off&& pos, Rdr&& reader = Rdr()) const noexcept
 		requires(std::is_trivially_copyable_v<T>)
 	{
 		static_assert(std::endian::native == std::endian::little, "Big Endian platform support not implemented");
 		if (std::size_t(pos) >= data.size() || std::size_t(pos) + sizeof(T) > data.size())
 			return false;
-		std::memcpy(&dst, data.data() + pos, sizeof(T));
+		reader(pos, reinterpret_cast<char*>(&dst), data.data() + pos, sizeof(T));
 		if constexpr (!std::is_const_v<std::remove_reference_t<Off>>)
 			pos += sizeof(T); // Optionally increment position
 		return true;
 	}
 
 	// Read null-terminated string (one byte after data shall be valid and zero, like in std::string)
-	template <typename Off>
-	bool read_le(std::string& dst, Off&& pos) const noexcept
+	template <typename Off, typename Rdr = memcpy_reader>
+	bool read_le(std::string& dst, Off&& pos, Rdr&& reader = Rdr()) const noexcept
 	{
 		if (std::size_t(pos) >= data.size())
 			return false;
-		dst = data.data() + pos;
+		for (std::size_t i = pos; i < data.size(); i++) {
+			char c = 0;
+			reader(i, &c, data.data() + i, 1);
+			if (!c)
+				break;
+			dst += c;
+		}
 		if constexpr (!std::is_const_v<std::remove_reference_t<Off>>)
 			pos += data.size() + 1;
 		return true;
 	}
 
 	// Helper
-	template <typename... T, std::size_t... Idx>
-	bool read_le(std::tuple<T..., bool>& dst, std::size_t& off, std::index_sequence<Idx...>) const noexcept
+	template <typename... T, std::size_t... Idx, typename Rdr = memcpy_reader>
+	bool read_le(std::tuple<T..., bool>& dst, std::size_t& off, std::index_sequence<Idx...>, Rdr&& reader = Rdr()) const noexcept
 	{
-		return (read_le(std::get<Idx>(dst), off) && ...);
+		return (read_le(std::get<Idx>(dst), off, std::forward<Rdr>(reader)) && ...);
 	}
 
 	// Read little-endian value(s) (as "packed" struct)
-	template <typename... T, typename Off>
-	std::tuple<T..., bool> read_le(Off&& pos) const noexcept
+	template <typename... T, typename Off, typename Rdr = memcpy_reader>
+	std::tuple<T..., bool> read_le(Off&& pos, Rdr&& reader = Rdr()) const noexcept
 	{
 		std::tuple<T..., bool> result{};
 		std::size_t off = pos;
-		if (read_le<T...>(result, off, std::make_index_sequence<sizeof...(T)>()))
+		if (read_le<T...>(result, off, std::make_index_sequence<sizeof...(T)>(), std::forward<Rdr>(reader)))
 			std::get<sizeof...(T)>(result) = true;
 		if constexpr (!std::is_const_v<std::remove_reference_t<Off>>)
 			pos += (off - pos); // Optionally increment position
@@ -144,12 +158,12 @@ struct parser_base {
 	}
 
 	// Read little-endian value(s) with types encoded in template args
-	template <auto... V, typename Off>
-	std::tuple<make_type_t<V>..., bool> read_le(Off&& pos) const noexcept
+	template <auto... V, typename Off, typename Rdr = memcpy_reader>
+	std::tuple<make_type_t<V>..., bool> read_le(Off&& pos, Rdr&& reader = Rdr()) const noexcept
 	{
 		std::tuple<make_type_t<V>..., bool> result{};
 		std::size_t off = pos;
-		if (read_le<make_type_t<V>...>(result, off, std::make_index_sequence<sizeof...(V)>()))
+		if (read_le<make_type_t<V>...>(result, off, std::make_index_sequence<sizeof...(V)>(), std::forward<Rdr>(reader)))
 			std::get<sizeof...(V)>(result) = true;
 		if constexpr (!std::is_const_v<std::remove_reference_t<Off>>)
 			pos += (off - pos); // Optionally increment position

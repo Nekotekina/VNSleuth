@@ -190,6 +190,9 @@ static const std::unordered_set<std::string_view> script_locations{
 	{"data01000.arc"},
 };
 
+// Externally provided key for ExHIBIT files (zero key by default = no encryption)
+char g_exhibit_key[1024]{};
+
 void script_parser::read_segments(const std::string& name)
 {
 	// Detect script format then parse appropriately
@@ -209,6 +212,32 @@ void script_parser::read_segments(const std::string& name)
 			parser.read_segments(n);
 		}
 		return;
+	}
+
+	if (!is_text && data.starts_with("\0DLR"sv)) {
+		// ExHIBIT script file decryption function
+		static auto xor_view = [](std::size_t off, char* dst, const char* src, std::size_t count) {
+			for (std::size_t i = 0; i < count; i++) {
+				dst[i] = src[i];
+				if (i + off >= 0x10 && i + off < 0xffd0) {
+					char k = g_exhibit_key[(i + off - 0x10) % 1024];
+					dst[i] ^= k;
+				}
+			}
+		};
+
+		auto [int1, int2, int3, ok] = read_le<4u, 4u, 4u>(4);
+		if (ok) {
+			std::string fn = "__vnsleuth/__vnsleuth_dump_";
+			fn += name - ".rld";
+			std::ofstream f(fn, std::ios::trunc | std::ios::binary);
+			f.write(data.data(), 0x10);
+			char c;
+			std::size_t pos = 0x10;
+			while (read_le(c, pos, xor_view))
+				f.write(&c, 1);
+			return;
+		}
 	}
 
 	if (!is_text && data.starts_with("BurikoCompiledScriptVer1.00\0"sv)) {
