@@ -120,6 +120,18 @@ void add_line(int choice, std::string name, std::string text)
 	line.name = std::move(name);
 	line.text = std::move(text);
 	line.sq_text = std::as_const(text_it->first);
+	line.segment = id.first;
+
+	if (!line.name.empty() && choice == 0) {
+		// Remove annoying suffixes from names (possibly requires manual editing of names.txt)
+		auto found = g_speakers.find(line.name);
+		auto prev = found;
+		while (prev != g_speakers.begin()) {
+			prev = std::prev(prev);
+			if (found->first.starts_with(prev->first - ":") && prev->first.size() < line.name.size())
+				line.name = prev->first;
+		}
+	}
 
 	// Remember all encountered characters in a bitmap (doesn't include names)
 	for (char32_t c : text_it->first)

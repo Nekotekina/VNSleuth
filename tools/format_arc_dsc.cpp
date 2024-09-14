@@ -27,7 +27,7 @@
 #include "parser_base.hpp"
 #include "parser_bits.hpp"
 
-struct parser_arc_dsc : parser_base2 {
+struct parser_arc_dsc final : parser_base2 {
 	using parser_base2::parser_base2;
 	parser_base& parse(bool full, parser_base* opt_dst) override;
 };

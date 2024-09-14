@@ -95,6 +95,9 @@ inline enum class op_mode {
 	rt_llama,
 } g_mode{};
 
+// Line location (segment and index)
+using line_id = std::pair<uint, uint>;
+
 struct line_info {
 	std::string name;		  // Character name (speaker), may be empty
 	std::string text;		  // Original text
@@ -103,6 +106,12 @@ struct line_info {
 	std::string pre_ann;
 	std::string post_ann;
 	std::vector<std::vector<int>> tr_tts; // tr_text tokens (only translated part)
+	uint tokens;
+	uint segment;
+	std::vector<float> embd;
+	double embd_sqrsum;
+
+	line_id get_id() const;
 };
 
 struct segment_info {
@@ -112,9 +121,6 @@ struct segment_info {
 	std::vector<std::string> prev_segs; // For history extraction
 	std::string tr_tail;
 };
-
-// Line location (segment and index)
-using line_id = std::pair<uint, uint>;
 
 // Bad line id for ambiguous lines
 static constexpr line_id c_bad_id{UINT32_MAX, UINT32_MAX};
@@ -244,6 +250,14 @@ inline line_info& loaded_lines::iterator::operator*() const
 	return g_lines[*this];
 }
 
+inline line_id line_info::get_id() const
+{
+	line_id r;
+	r.first = segment;
+	r.second = this - g_lines.segs[segment].lines.data();
+	return r;
+}
+
 // String database for search (squeezed string -> line_id)
 inline std::unordered_map<std::u16string, line_id> g_strings;
 
@@ -339,6 +353,7 @@ enum class tr_cmd {
 	sync,	   // Terminate background worker
 	eject,	   // Eject id.second last lines
 	reload,	   // Reload starting from id
+	unload,	   // On exit
 };
 
 // Obvious.

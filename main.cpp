@@ -66,6 +66,8 @@ std::string g_neg;
 std::string example = "JP: この物語はフィクションです。\n"
 					  "En: This story is a work of fiction.\n";
 
+std::string cache_prefix;
+
 // Print line, return original speaker name if first encountered
 std::string print_line(line_id id, std::string* line = nullptr, bool stream = false)
 {
@@ -474,14 +476,14 @@ int main(int argc, char* argv[])
 		g_mode = op_mode::rt_cached;
 	} else if (argc >= 3 && argv[2] == "--legacy"sv) {
 		g_mode = op_mode::print_only;
-	} else if (argc >= 3 && argv[2] == "--check"sv) {
+	} else if (argc >= 3 && (argv[2] == "--check"sv || argv[2] == "--repair"sv)) {
 		g_mode = op_mode::print_info;
 	}
 
 	static const auto argv_ = argv;
 	static const auto print_usage = [](int, char**) {
 		auto argv = argv_;
-		std::cerr << "VNSleuth v0.3" << std::endl;
+		std::cerr << "VNSleuth v0.4" << std::endl;
 		std::cerr << "Usage 0: " << argv[0] << " <game_directory> --color" << std::endl;
 		std::cerr << "\tUse existing translation cache only (only useful if it's complete)." << std::endl;
 		std::cerr << "Usage 1: " << argv[0] << " <game_directory> --check" << std::endl;
@@ -498,18 +500,19 @@ int main(int argc, char* argv[])
 
 	gpt_params params{};
 	params.n_gpu_layers = 999;
-	params.flash_attn = 1;
-	//params.cache_type_k = "q8_0";
-	//params.cache_type_v = "q8_0";
+	params.n_gpu_layers_draft = 999;
+	params.flash_attn = 1; // FA is currently NEEDED for efficient GPU KV-cache saving/restoring
+	params.cache_type_k = "q8_0";
+	params.cache_type_v = "q8_0";
 	params.n_ctx = 4096;
 	params.n_batch = 2048;
 	params.n_predict = 128;
 	params.sparams.seed = 0;
-	params.sparams.temp = 1;
 	params.sparams.temp = 0.2;
 	params.sparams.top_p = 0.3;
 	params.sparams.penalty_last_n = 3;
 	params.sparams.penalty_repeat = 1.1;
+	params.warmup = false;
 	params.model = ".";
 	params.n_keep = 6; // Used by background thread, number of lines to translate ahead of time
 
@@ -522,7 +525,7 @@ int main(int argc, char* argv[])
 			argc--;
 			argv++;
 		}
-		if (!gpt_params_parse(argc, argv, params, LLAMA_EXAMPLE_MAIN, print_usage)) {
+		if (!gpt_params_parse(argc, argv, params, LLAMA_EXAMPLE_SPECULATIVE, print_usage)) {
 			return 1;
 		}
 
@@ -551,6 +554,7 @@ int main(int argc, char* argv[])
 	bool is_broken = false;
 
 	// Load file list recursively
+	cache_prefix = fs::path(dir_name).filename();
 	vnsleuth_path = fs::absolute(fs::path(dir_name)).lexically_normal() / "__vnsleuth";
 	std::map<std::string, std::size_t, natural_order_less> file_list;
 	if (fs::is_directory(dir_name)) {
@@ -816,7 +820,7 @@ int main(int argc, char* argv[])
 			update_names(names_path);
 		}
 
-		if (argc > 3 && argv[3] == "--repair"sv) {
+		if (argv[0] == "--repair"sv) {
 			// Update all segments
 			for (auto& seg : g_lines.segs) {
 				if (!seg.lines.at(0).tr_text.empty() || !seg.tr_tail.empty()) {
@@ -934,7 +938,7 @@ int main(int argc, char* argv[])
 				});
 				next = g_lines.next(last);
 				if (last.second + 1 == 0) {
-					// Inbetween segments
+					// Inbetween segments (TODO: seems broken)
 					next.first = last.first;
 					next.second = 0;
 					last.first = g_lines.segs_by_name.at(s.prev_segs.back());
@@ -959,15 +963,6 @@ int main(int argc, char* argv[])
 	};
 	std::tie(prev_id, next_id) = get_incompletes();
 
-	if (g_mode == op_mode::rt_llama) {
-		load_history(prev_id);
-		// Also kick translator
-		if (prev_id != c_bad_id) {
-			if (!translate(params, prev_id, tr_cmd::kick))
-				return false;
-		}
-	}
-
 	// List of IDs that must be processed (possibly more than once)
 	std::vector<line_id> id_queue;
 	auto flush_id_queue = [&]() -> bool {
@@ -990,11 +985,29 @@ int main(int argc, char* argv[])
 			return true;
 		}
 
-		bool is_kicked = false;
+		bool need_kick = false;
 		for (auto& id : id_queue) {
+			if (g_stop) {
+				need_kick = false;
+				break;
+			}
 			std::unique_lock lock(g_mutex);
 			auto& line = g_lines[id];
-			if (!line.tr_text.empty()) {
+			if (line.tr_text.empty()) {
+				if (g_mode != op_mode::rt_llama) {
+					std::cerr << "Error: Translation cache is incomplete" << std::endl;
+					break;
+				}
+				lock.unlock();
+				// Wait for current id instead of discarding it
+				if (!translate(params, g_lines.next(id), tr_cmd::sync))
+					return false;
+			}
+			if (line.tr_text.empty()) {
+				need_kick = true;
+				if (!translate(params, id))
+					return false;
+			} else {
 				auto out = line.tr_text; // copy
 
 				static const auto real_iprefix = iprefix + (iprefix.ends_with(" ") ? "" : " ");
@@ -1021,14 +1034,12 @@ int main(int argc, char* argv[])
 				}
 				out.replace(suff_pos + 1, real_isuffix.size() - 1, g_esc.tran);
 				std::cout << out << g_esc.reset << std::flush;
-				lock.unlock();
+				if (lock)
+					lock.unlock();
 
-				if (g_mode == op_mode::rt_llama && !is_kicked) {
-					is_kicked = true;
-					if (!translate(params, id, tr_cmd::kick))
-						return false;
-				}
+				need_kick = true;
 				if (g_mode == op_mode::rt_llama && g_lines.is_last(id)) {
+					need_kick = false;
 					// Prepare to autosave segment on last id
 					if (!translate(params, line_id{id.first, 0u - 1}, tr_cmd::sync))
 						return false;
@@ -1036,14 +1047,6 @@ int main(int argc, char* argv[])
 				if (g_mode == op_mode::rt_llama && g_history.back() == id) {
 					g_stats->raw_accepts++;
 				}
-			} else if (g_mode == op_mode::rt_cached) {
-				std::cerr << "Error: Translation cache is incomplete" << std::endl;
-				break;
-			} else {
-				lock.unlock();
-				if (!translate(params, id))
-					return false;
-				g_stats->raw_accepts++;
 			}
 			if (g_mode == op_mode::rt_llama && id == g_history.back() && id.second % 30 == 29) {
 				// Autosave lines at each 30th line
@@ -1053,6 +1056,9 @@ int main(int argc, char* argv[])
 
 		if (g_mode != op_mode::rt_llama) {
 			id_queue.clear();
+		} else if (need_kick) {
+			if (!translate(params, id_queue.back(), tr_cmd::kick))
+				return false;
 		}
 		return true;
 	};
@@ -1060,6 +1066,7 @@ int main(int argc, char* argv[])
 	std::u16string last_line;
 	if (g_mode == op_mode::rt_llama) {
 		// Show previous message(s) in a limited fashion (one message + selections)
+		load_history(prev_id);
 		auto it = g_history.rbegin();
 		if (it != g_history.rend()) {
 			last_line = g_lines[*it].sq_text;
@@ -1107,6 +1114,8 @@ int main(int argc, char* argv[])
 	std::vector<std::u16string> back_buf;
 	while (!g_stop && std::getline(std::cin, line)) {
 		update_input_time();
+		if (g_stop)
+			break;
 		// Preprocess special ":" character
 		REPLACE(line, ":", "：");
 		if (g_mode == op_mode::rt_llama) {
@@ -1138,17 +1147,16 @@ int main(int argc, char* argv[])
 				if (g_history.empty()) {
 					continue;
 				}
-				if (g_history.back().second == 0) {
-					// TODO
-					std::cerr << "Rewinding across segments is not implemented." << std::endl;
-					continue;
-				}
 
 				std::cerr << "Rewinding... " << std::endl;
 				next_id = g_history.back();
 				g_history.pop_back();
 				prev_id = g_history.back();
 				id_queue = {prev_id};
+				if (g_history.back().second == 0) {
+					// TODO: this is unsafe because it can break history chain, this assumes forward request will follow
+					std::cerr << "*** Going back to segment " << g_lines.segs[prev_id.first].src_name << std::endl;
+				}
 				last_line.clear();
 				if (!translate(params, g_lines.next(next_id), tr_cmd::sync))
 					return 1;
@@ -1163,25 +1171,27 @@ int main(int argc, char* argv[])
 
 			if (line == "\x0e") {
 				// Process forward ("next") request (^N)
-				// Proceed after last history entry
 				if (g_history.empty()) {
-					continue;
-				}
-				if (g_lines.is_last(g_history.back())) {
+					prev_id = c_bad_id;
+					next_id = {0, 0};
+				} else if (g_lines.is_last(g_history.back())) {
 					prev_id = g_history.back();
-					next_id = c_bad_id;
-					std::cerr << "Reached the end of segment." << std::endl;
-					continue;
+					if (prev_id.first == g_lines.segs.size() - 1) {
+						next_id = c_bad_id;
+						continue;
+					}
+					next_id.first = prev_id.first + 1;
+					next_id.second = 0;
+				} else {
+					prev_id = g_history.back();
+					next_id = g_lines.next(prev_id);
 				}
 
-				prev_id = g_lines.next(g_history.back());
-				next_id = g_lines.next(prev_id);
-				g_history.push_back(prev_id);
-				id_queue = {prev_id};
+				if (next_id.second == 0)
+					std::cerr << g_esc.reset << "*** Forced segment: " << g_lines.segs[next_id.first].src_name << std::endl;
 				last_line.clear();
-				if (!flush_id_queue())
-					return 1;
-				continue;
+				line = g_lines[next_id].text;
+				// Passthrough
 			}
 
 			if (line == "\06") {
@@ -1437,7 +1447,7 @@ int main(int argc, char* argv[])
 			// Handle unexpected line:
 			if (force_ambi || it->second == c_bad_id) {
 				// Remember ambiguous line
-				std::cerr << g_esc.buf << "Buffered: " << line << std::endl;
+				std::cerr << g_esc.buf << "Buffered: " << line << g_esc.reset << std::endl;
 				back_buf.emplace_back(std::move(sq_line));
 				next_id = c_bad_id;
 				continue;
@@ -1618,7 +1628,7 @@ int main(int argc, char* argv[])
 	update_input_time();
 	if (g_mode == op_mode::rt_llama && !g_history.empty()) {
 		// Stop background thread and discard
-		if (!translate(params, g_lines.next(g_history.back()), tr_cmd::sync))
+		if (!translate(params, g_lines.next(g_history.back()), tr_cmd::sync) || !translate(params, {}, tr_cmd::unload))
 			return 1;
 		// Save pending translations
 		if (!update_segment(g_history.back().first))
@@ -1657,8 +1667,10 @@ int main(int argc, char* argv[])
 			if (!line.tr_text.empty())
 				tr_count++;
 		}
-		std::cerr << "Translated: " << tr_count << "/" << g_lines.count_lines();
-		std::cerr << " (" << 100 * read_time0 / tr_count / 100. << "s/line)" << std::endl;
+		if (tr_count) {
+			std::cerr << "Translated: " << tr_count << "/" << g_lines.count_lines();
+			std::cerr << " (" << 100 * read_time0 / tr_count / 100. << "s/line)" << std::endl;
+		}
 		if (auto count = g_stats->raw_translates.load()) {
 			std::cerr << "Attempts: " << count;
 			auto acpt = g_stats->raw_accepts.load() * 10000 / count / 100.;
