@@ -1,4 +1,5 @@
 #include "main.hpp"
+#include "arg.h"
 #include "common.h"
 #include "llama.h"
 #include "parser.hpp"
@@ -15,6 +16,7 @@
 #include <iostream>
 #include <memory>
 #include <mutex>
+#include <numeric>
 #include <span>
 #include <string>
 #include <string_view>
@@ -57,6 +59,8 @@ std::string iprefix = "JP: ";
 // However, it may appear in Chinese texts as a delimiter.
 // This may provoke Chinese-speaking model to output Chinese.
 std::string isuffix = "En:";
+
+std::string g_neg;
 
 // Translation example injected after prompt
 std::string example = "JP: この物語はフィクションです。\n"
@@ -455,7 +459,7 @@ std::pair<uint, uint> load_translation(uint seg, const fs::path& path, bool veri
 	// Check and load what remains in the file
 	auto old = std::move(g_lines.segs[seg].tr_tail);
 	g_lines.segs[seg].tr_tail = std::move(text);
-	if (keep && g_lines.segs[seg].tr_tail == old)
+	if (keep)
 		kept = -1;
 
 	return std::make_pair(id.second, verify ? !is_broken : kept);
@@ -472,7 +476,11 @@ int main(int argc, char* argv[])
 		g_mode = op_mode::print_only;
 	} else if (argc >= 3 && argv[2] == "--check"sv) {
 		g_mode = op_mode::print_info;
-	} else if (argc < 2) {
+	}
+
+	static const auto argv_ = argv;
+	static const auto print_usage = [](int, char**) {
+		auto argv = argv_;
 		std::cerr << "VNSleuth v0.3" << std::endl;
 		std::cerr << "Usage 0: " << argv[0] << " <game_directory> --color" << std::endl;
 		std::cerr << "\tUse existing translation cache only (only useful if it's complete)." << std::endl;
@@ -481,29 +489,29 @@ int main(int argc, char* argv[])
 		std::cerr << "Usage 2: " << argv[0] << " <game_directory> --color -m <model> [<LLAMA args>...]" << std::endl;
 		std::cerr << "\tStart translating in real time (recommended)." << std::endl;
 		std::cerr << "Nothing to do." << std::endl;
-		return 1;
-	}
+	};
 
-	if (argv[1] == "--help"sv) {
-		std::cerr << "(TODO) run without arguments to see usage example." << std::endl;
+	if (argc < 2 || argv[1] == "--help"sv) {
+		print_usage(argc, argv);
 		return 1;
 	}
 
 	gpt_params params{};
 	params.n_gpu_layers = 999;
+	params.flash_attn = 1;
 	//params.cache_type_k = "q8_0";
 	//params.cache_type_v = "q8_0";
-	params.seed = 0;
 	params.n_ctx = 4096;
 	params.n_batch = 2048;
 	params.n_predict = 128;
+	params.sparams.seed = 0;
 	params.sparams.temp = 1;
 	params.sparams.temp = 0.2;
 	params.sparams.top_p = 0.3;
 	params.sparams.penalty_last_n = 3;
 	params.sparams.penalty_repeat = 1.1;
 	params.model = ".";
-	params.n_draft = 6; // Used by background thread, number of lines to translate ahead of time
+	params.n_keep = 6; // Used by background thread, number of lines to translate ahead of time
 
 	// Basic param check
 	std::string dir_name = argv[1];
@@ -514,8 +522,7 @@ int main(int argc, char* argv[])
 			argc--;
 			argv++;
 		}
-		if (!gpt_params_parse(argc, argv, params)) {
-			gpt_params_print_usage(argc, argv, params);
+		if (!gpt_params_parse(argc, argv, params, LLAMA_EXAMPLE_MAIN, print_usage)) {
 			return 1;
 		}
 
@@ -533,6 +540,7 @@ int main(int argc, char* argv[])
 			if (!example.ends_with("\n"))
 				example += '\n';
 		}
+		params.n_draft = params.n_keep;
 		if (g_mode == op_mode::rt_llama && params.model == ".")
 			g_mode = op_mode::rt_cached;
 	}
@@ -1113,13 +1121,13 @@ int main(int argc, char* argv[])
 				}
 				if (!translate(params, g_lines.next(id_queue.back()), tr_cmd::sync))
 					return 1;
-				params.sparams.cfg_negative_prompt.clear();
+				g_neg.clear();
 				auto& tr_text = g_lines[id_queue.back()].tr_text;
 				if (tr_text.rfind(line) + 1 > tr_text.rfind("\n" + isuffix) + 1 + isuffix.size() + !isuffix.ends_with(" "))
-					params.sparams.cfg_negative_prompt = std::move(line);
+					g_neg = std::move(line);
 				if (!translate(params, id_queue.back()))
 					return 1;
-				params.sparams.cfg_negative_prompt.clear();
+				g_neg.clear();
 				g_stats->rt_rewrites++;
 				continue;
 			}
@@ -1190,7 +1198,6 @@ int main(int argc, char* argv[])
 					continue;
 				}
 
-				// Doesn't really matter what to add here, since translator won't see it
 				g_lines.segs[prev_id.first].tr_tail = "<END>\n";
 				update_segment(prev_id.first);
 				prev_id = c_bad_id;
@@ -1260,10 +1267,6 @@ int main(int argc, char* argv[])
 						std::fprintf(stderr, "%s[] Reload: eject %u, keep %u\n", g_esc.reset, to_eject, kept_lines);
 					if (!translate(params, {0u, to_eject}, tr_cmd::eject))
 						return 1;
-					for (line_id kid{prev_id.first, kept_lines}; kid <= prev_id; g_lines.advance(kid)) {
-						// Add dummy to prevent context ejection to improve replayability in some cases
-						g_lines[kid].tr_tts = decltype(line_info::tr_tts)(1);
-					}
 					if (!translate(params, {next_id.first, kept_lines}, tr_cmd::reload))
 						return 1;
 				}

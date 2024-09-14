@@ -1,15 +1,19 @@
 #include "common.h"
 #include "llama.h"
 #include "main.hpp"
+#include "sampling.h"
+#include "tools/tiny_sha1.hpp"
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <deque>
 #include <mutex>
+#include <numeric>
 #include <thread>
 
 extern volatile bool g_stop;
 
+extern std::string g_neg;
 extern std::string example;
 extern std::string iprefix;
 extern std::string isuffix;
@@ -113,12 +117,14 @@ bool translate(gpt_params& params, line_id id, tr_cmd cmd)
 	};
 
 	// Initialize llama.cpp
-	static const auto [model, ctx] = [&]() -> std::tuple<llama_model*, llama_context*> {
+	static const auto init_result = [&]() -> llama_init_result {
 		llama_backend_init();
 		llama_numa_init(params.numa);
 		return llama_init_from_gpt_params(params);
 	}();
 
+	static const auto model = init_result.model;
+	static const auto ctx = init_result.context;
 	static std::vector<llama_token> tokens; // Current tokens (not necessarily decoded)
 	static std::deque<uint> chunks;			// Size (in tokens) of each translated message block
 	static uint decoded = 0;				// Number of token successfully llama_decode()'d
@@ -129,7 +135,7 @@ bool translate(gpt_params& params, line_id id, tr_cmd cmd)
 		explicit operator bool() const { return model && ctx; }
 		_init_t(gpt_params& params)
 		{
-			if (!model || !ctx || params.n_draft <= 0)
+			if (!model || !ctx)
 				return;
 		}
 		~_init_t()
@@ -351,15 +357,9 @@ bool translate(gpt_params& params, line_id id, tr_cmd cmd)
 		eject_bunch(-1);
 
 		// Load full history
-		prev_tail = nullptr;
 		for (auto& id : g_history) {
 			if (g_lines[id].tr_text.empty())
 				break;
-			if (id.second == 0 && prev_tail) {
-				chunks.emplace_back();
-				push_str(*prev_tail);
-				prev_tail = nullptr;
-			}
 			chunks.emplace_back();
 			push_id(id);
 			auto& tail = g_lines.segs[id.first].tr_tail;
@@ -378,9 +378,6 @@ bool translate(gpt_params& params, line_id id, tr_cmd cmd)
 					tail = "\n";
 					update_segment(segment, true, -1);
 				}
-				prev_tail = nullptr;
-				chunks.emplace_back();
-				push_str(tail);
 			}
 		}
 	};
@@ -460,16 +457,9 @@ bool translate(gpt_params& params, line_id id, tr_cmd cmd)
 		if (!(std::lock_guard{g_mutex}, line.tr_text.empty()))
 			continue;
 
-		if (prev_tail && pid.second == 0) {
-			chunks.emplace_back();
-			push_str(*prev_tail);
-			prev_tail = nullptr;
-		}
-
-		auto& neg = params.sparams.cfg_negative_prompt;
 		std::string llama_out;
-		llama_out += line.pre_ann = std::move(g_lines.segs[segment].tr_tail) + line.pre_ann;
-		if (pid < id || line.tr_tts.size() <= 1)
+		llama_out += line.pre_ann;
+		if (pid < id || line.tr_tts.empty() || line.tr_tts.size() == 1)
 			echo = true; // Sticky flag to display source line/annotations, otherwise this is rewrite request
 		if (std::this_thread::get_id() == s_main_tid && echo)
 			std::cout << g_esc.orig << line.pre_ann << std::flush;
@@ -483,7 +473,7 @@ bool translate(gpt_params& params, line_id id, tr_cmd cmd)
 		// Encode speaker separately and count its tokens
 		int pred_count = 0;
 		// Process rewrite request (cfg_negative_prompt is just abused to pass the selection)
-		if (std::this_thread::get_id() == s_main_tid && !neg.empty()) {
+		if (std::this_thread::get_id() == s_main_tid && !g_neg.empty()) {
 			// Copy previous translation's tokens preceding selection
 			llama_out.clear();
 			std::vector<std::string> tstrs;
@@ -491,7 +481,7 @@ bool translate(gpt_params& params, line_id id, tr_cmd cmd)
 				tstrs.emplace_back(llama_token_to_piece(ctx, t));
 				llama_out += tstrs.back();
 				pred_count++;
-				if (auto negpos = llama_out.find(neg); negpos + 1) {
+				if (auto negpos = llama_out.find(g_neg); negpos + 1) {
 					while (llama_out.size() > negpos) {
 						llama_out -= tstrs.back();
 						tstrs.pop_back();
@@ -540,18 +530,13 @@ bool translate(gpt_params& params, line_id id, tr_cmd cmd)
 		// Decode pending tokens if necessary
 		decode();
 
-		static const auto sctx = [&]() {
-			static const auto sctx = llama_sampling_init(params.sparams);
-			atexit([]() { llama_sampling_free(sctx); });
-			return sctx;
-		}();
-		llama_sampling_reset(sctx);
-		llama_sampling_set_rng_seed(sctx, 0);
+		auto sparams = params.sparams;
 		if (!line.tr_tts.empty())
-			llama_sampling_set_rng_seed(sctx, std::accumulate(line.tr_tts.back().begin(), line.tr_tts.back().end(), line.tr_tts.size()));
+			sparams.seed += std::accumulate(line.tr_tts.back().begin(), line.tr_tts.back().end(), line.tr_tts.size());
+		const auto sctx = gpt_sampler_init(model, sparams);
 		const bool use_grammar = !line.name.empty();
 		for (int i = 0; i < pred_count; i++)
-			llama_sampling_accept(sctx, ctx, *(tokens.rbegin() + pred_count - i), use_grammar);
+			gpt_sampler_accept(sctx, *(tokens.rbegin() + pred_count - i), use_grammar);
 		static const auto real_isuffix = "\n" + isuffix;
 		const auto replaces = make_name_replaces(line.text);
 		std::size_t last_neg = spker.size();
@@ -598,7 +583,7 @@ bool translate(gpt_params& params, line_id id, tr_cmd cmd)
 					logits[llama_tokenize(ctx, " ", false)[0]] -= 1.f;
 				}
 			}
-			auto token_id = llama_sampling_sample(sctx, ctx, nullptr);
+			auto token_id = gpt_sampler_sample(sctx, ctx, -1);
 			g_stats->raw_samples++;
 			auto stamp1 = std::chrono::steady_clock::now();
 			g_stats->sample_time += (stamp1 - stamp0).count() / 1000;
@@ -618,7 +603,7 @@ bool translate(gpt_params& params, line_id id, tr_cmd cmd)
 			}
 			tokens.push_back(token_id);
 
-			llama_sampling_accept(sctx, ctx, token_id, use_grammar);
+			gpt_sampler_accept(sctx, token_id, use_grammar);
 			llama_out += token_str;
 			int to_decode = 1;
 			int to_penalize = -1;
@@ -647,7 +632,7 @@ bool translate(gpt_params& params, line_id id, tr_cmd cmd)
 				// TODO: implement separate replace system whith takes original text into account
 				auto fixed = llama_out;
 				// Also apply "neg" as a replacement
-				if (auto nf = fixed.find(neg, last_neg); !neg.empty() && nf + 1) {
+				if (auto nf = fixed.find(g_neg, last_neg); !g_neg.empty() && nf + 1) {
 					// Completely cut the continuation
 					fixed.resize(nf);
 					// Sanitize trailing spaces because it can break the output
@@ -708,9 +693,9 @@ bool translate(gpt_params& params, line_id id, tr_cmd cmd)
 					decoded -= to_remove;
 					if (!llama_kv_cache_seq_rm(ctx, 0, p0, p0 + to_remove))
 						throw std::runtime_error("llama_kv_cache_seq_rm replaces");
-					llama_sampling_reset(sctx);
+					gpt_sampler_reset(sctx);
 					for (auto& t : tt)
-						llama_sampling_accept(sctx, ctx, t, use_grammar);
+						gpt_sampler_accept(sctx, t, use_grammar);
 					llama_out = std::move(fixed);
 					pred_count += to_decode - to_remove - 1;
 					token_str.clear();
@@ -752,6 +737,8 @@ bool translate(gpt_params& params, line_id id, tr_cmd cmd)
 				}
 			}
 		}
+
+		gpt_sampler_free(sctx);
 		g_stats->sample_count += pred_count;
 		if (is_stopped() && !llama_out.ends_with("\n") && std::this_thread::get_id() == s_main_tid)
 			std::cout << std::endl; // Stop current line
@@ -785,6 +772,9 @@ bool translate(gpt_params& params, line_id id, tr_cmd cmd)
 
 	if (!is_stopped() && std::this_thread::get_id() == s_main_tid && g_mode == op_mode::rt_llama && id != c_bad_id) {
 		// Launch worker thread to continue translation in the background
+		// Check if thread is disabled:
+		if (params.n_draft <= 0)
+			return true;
 		// Check if the next line is untranslated
 		if (auto next = g_lines.next(id); next != c_bad_id) {
 			std::lock_guard lock(g_mutex);
@@ -794,9 +784,6 @@ bool translate(gpt_params& params, line_id id, tr_cmd cmd)
 			// Nothing to do
 			return true;
 		}
-
-		if (!g_lines.segs[id.first].tr_tail.empty())
-			return true;
 
 		stop_sig = -1;
 		work_res = id.second + 1;
