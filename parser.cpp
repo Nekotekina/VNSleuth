@@ -137,10 +137,6 @@ void add_line(int choice, std::string name, std::string text)
 	for (char32_t c : text_it->first)
 		g_chars.set(c);
 
-	// Check max length of squeezed string
-	if (text_it->first.size() > 255)
-		throw std::runtime_error("Line too long: " + line.text);
-
 	if (id.second == 0) {
 		auto [it, ok2] = g_start_strings.emplace(text_it->first, id);
 		if (!ok2)

@@ -206,6 +206,13 @@ int main(int argc, char* argv[])
 					fflush(stdout);
 					continue;
 				}
+				if (cookie->evtype == XI_RawButtonPress && event->detail == 8) {
+					// Send ^N continue request
+					putchar('\x0e');
+					putchar('\n');
+					fflush(stdout);
+					continue;
+				}
 			}
 		}
 

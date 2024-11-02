@@ -27,6 +27,7 @@
 #include <sys/types.h>
 #ifndef _WIN32
 #include <sys/mman.h>
+#include <sys/resource.h>
 #include <unistd.h>
 #else
 #ifndef NOMINMAX
@@ -471,6 +472,11 @@ void sigh(int) { g_stop = true; }
 
 int main(int argc, char* argv[])
 {
+	if (std::getenv("VNSLEUTH_COREDUMP")) {
+		rlimit lim{rlim_t(-1), rlim_t(-1)};
+		setrlimit(RLIMIT_CORE, &lim);
+	}
+
 	g_mode = op_mode::rt_llama;
 	if (argc == 2) {
 		g_mode = op_mode::rt_cached;
@@ -483,7 +489,7 @@ int main(int argc, char* argv[])
 	static const auto argv_ = argv;
 	static const auto print_usage = [](int, char**) {
 		auto argv = argv_;
-		std::cerr << "VNSleuth v0.4" << std::endl;
+		std::cerr << "VNSleuth v0.5" << std::endl;
 		std::cerr << "Usage 0: " << argv[0] << " <game_directory> --color" << std::endl;
 		std::cerr << "\tUse existing translation cache only (only useful if it's complete)." << std::endl;
 		std::cerr << "Usage 1: " << argv[0] << " <game_directory> --check" << std::endl;
@@ -498,22 +504,23 @@ int main(int argc, char* argv[])
 		return 1;
 	}
 
-	gpt_params params{};
+	common_params params{};
 	params.n_gpu_layers = 999;
 	params.n_gpu_layers_draft = 999;
 	params.flash_attn = 1; // FA is currently NEEDED for efficient GPU KV-cache saving/restoring
-	params.cache_type_k = "q8_0";
-	params.cache_type_v = "q8_0";
+	//params.cache_type_k = "q8_0";
+	//params.cache_type_v = "q8_0";
 	params.n_ctx = 4096;
 	params.n_batch = 2048;
 	params.n_predict = 128;
 	params.sparams.seed = 0;
 	params.sparams.temp = 0.2;
 	params.sparams.top_p = 0.3;
-	params.sparams.penalty_last_n = 3;
+	params.sparams.penalty_last_n = 64;
 	params.sparams.penalty_repeat = 1.1;
 	params.warmup = false;
 	params.model = ".";
+	params.model_draft = "";
 	params.n_keep = 6; // Used by background thread, number of lines to translate ahead of time
 
 	// Basic param check
@@ -525,7 +532,7 @@ int main(int argc, char* argv[])
 			argc--;
 			argv++;
 		}
-		if (!gpt_params_parse(argc, argv, params, LLAMA_EXAMPLE_SPECULATIVE, print_usage)) {
+		if (!common_params_parse(argc, argv, params, LLAMA_EXAMPLE_SPECULATIVE, print_usage)) {
 			return 1;
 		}
 
@@ -559,11 +566,7 @@ int main(int argc, char* argv[])
 	std::map<std::string, std::size_t, natural_order_less> file_list;
 	if (fs::is_directory(dir_name)) {
 		fs::create_directory(vnsleuth_path);
-		fs::path path = vnsleuth_path;
-		replaces_path = path / "__vnsleuth_replace.txt";
-		prompt_path = path / "__vnsleuth_prompt.txt";
-		names_path = path / "__vnsleuth_names.txt";
-		for (const auto& entry : fs::recursive_directory_iterator(path.parent_path(), fs::directory_options::follow_directory_symlink)) {
+		for (const auto& entry : fs::recursive_directory_iterator(vnsleuth_path.parent_path(), fs::directory_options::follow_directory_symlink)) {
 			if (entry.is_regular_file()) {
 				// Skip __vnsleuth directory entirely
 				const auto fname = entry.path().string();
@@ -575,10 +578,18 @@ int main(int argc, char* argv[])
 					file_list.emplace(entry.path(), size);
 			}
 		}
+	} else if (fs::is_regular_file(dir_name) && dir_name.ends_with(".txt")) {
+		// a.txt creates ./a/__vnsleuth/
+		vnsleuth_path = fs::absolute(fs::path(dir_name - ".txt")).lexically_normal() / "__vnsleuth";
+		fs::create_directories(vnsleuth_path);
 	} else {
 		std::cerr << "Not a directory: " << dir_name << std::endl;
 		return 1;
 	}
+
+	replaces_path = vnsleuth_path / "__vnsleuth_replace.txt";
+	prompt_path = vnsleuth_path / "__vnsleuth_prompt.txt";
+	names_path = vnsleuth_path / "__vnsleuth_names.txt";
 
 	// Open stat file for writing via memory map
 	std::shared_ptr<void> stats_ptr;
@@ -742,6 +753,54 @@ int main(int argc, char* argv[])
 		}
 	}
 
+	if (dir_name.ends_with(".txt") && file_list.empty()) {
+		// Load a single raw text file
+		std::ifstream txt(dir_name);
+		std::string line;
+		auto& seg = g_lines.segs.emplace_back();
+		g_lines.segs_by_name[".txt"] = 0;
+		seg.src_name = ".txt";
+		seg.cache_name = "__vnsleuth_text.txt";
+		while (std::getline(txt, line)) {
+			// Trim spaces
+			REPLACE(line, "\r", "");
+			while (line.ends_with(" ") || line.ends_with("　")) {
+				if (line.ends_with(" "))
+					line -= " ";
+				else
+					line -= "　";
+			}
+			while (line.starts_with(" ") || line.starts_with("　")) {
+				if (line.starts_with(" "))
+					line.erase(0, 1);
+				else
+					line.erase(0, 3);
+			}
+			if (line.starts_with("<") && line.ends_with(">")) {
+				// TODO
+				continue;
+			}
+			REPLACE(line, ":", "：");
+			REPLACE(line, "  ", " ");
+			if (!line.empty()) {
+				extern void add_line(int choice, std::string name, std::string text);
+				add_line(0, "", std::move(line));
+			}
+		}
+		const auto cache_path = vnsleuth_path / seg.cache_name;
+		if (fs::is_regular_file(cache_path)) {
+			const auto [tr_lines, verified] = load_translation(0, cache_path, true);
+			if (!verified) {
+				is_incomplete = true;
+				is_broken = true;
+			} else if (seg.tr_tail.empty() || tr_lines < seg.lines.size()) {
+				is_incomplete = true;
+			}
+		} else {
+			is_incomplete = true;
+		}
+	}
+
 	for (auto& [fname, fsize] : file_list) {
 		const int fd = open(fname.c_str(), O_RDONLY);
 		if (fd >= 0) {
@@ -826,6 +885,14 @@ int main(int argc, char* argv[])
 				if (!seg.lines.at(0).tr_text.empty() || !seg.tr_tail.empty()) {
 					update_segment(&seg - g_lines.segs.data(), false);
 				}
+			}
+		}
+
+		if (argv[0] == "--check"sv) {
+			// Dump text
+			std::ofstream dump(vnsleuth_path / "__vnsleuth_dump.txt", std::ios::trunc);
+			for (auto& line : g_lines) {
+				dump << line.name << line.text << std::endl;
 			}
 		}
 
@@ -1139,9 +1206,7 @@ int main(int argc, char* argv[])
 				g_neg.clear();
 				g_stats->rt_rewrites++;
 				continue;
-			}
-
-			if (line == "\02" || line == "\b") {
+			} else if (line == "\02" || line == "\b") {
 				// Process rewind request (^B)
 				// Remove last history entry, show previous one
 				if (g_history.empty()) {
@@ -1167,9 +1232,7 @@ int main(int argc, char* argv[])
 				if (!flush_id_queue())
 					return 1;
 				continue;
-			}
-
-			if (line == "\x0e") {
+			} else if (line == "\x0e") {
 				// Process forward ("next") request (^N)
 				if (g_history.empty()) {
 					prev_id = c_bad_id;
@@ -1192,9 +1255,7 @@ int main(int argc, char* argv[])
 				last_line.clear();
 				line = g_lines[next_id].text;
 				// Passthrough
-			}
-
-			if (line == "\06") {
+			} else if (line == "\06") {
 				// Process finalize request (^F)
 				if (g_history.empty() || prev_id != g_history.back() || !g_lines.is_last(prev_id)) {
 					std::cerr << "Must be at the end of segment, try ^N." << std::endl;
@@ -1217,15 +1278,11 @@ int main(int argc, char* argv[])
 				if (!translate(params, c_bad_id, tr_cmd::reload))
 					return 1;
 				continue;
-			}
-
-			if (line == "\03") {
+			} else if (line == "\03") {
 				// Process terminate request (^C)
 				g_stop = true;
 				break;
-			}
-
-			if (line == "\x12") {
+			} else if (line == "\x12") {
 				// Process reload request (^R)
 				if (!translate(params, {0, 0}, tr_cmd::sync))
 					return 1;
@@ -1295,15 +1352,16 @@ int main(int argc, char* argv[])
 					return 1;
 				g_stats->rt_reloads++;
 				continue;
-			}
-
-			if (line == "\x13") {
+			} else if (line == "\x13") {
 				// Process stop-and-save request (^S)
 				if (!translate(params, next_id, tr_cmd::sync))
 					return 1;
 				if (prev_id != c_bad_id && update_segment(prev_id.first)) {
 					std::cerr << "Wrote file: " << g_lines.segs[prev_id.first].cache_name << std::endl;
 				}
+				continue;
+			} else if (file_list.empty()) {
+				// Disable clipboard input
 				continue;
 			}
 		}
@@ -1314,7 +1372,7 @@ int main(int argc, char* argv[])
 		// Squeeze again
 		sq_line.erase(std::unique(sq_line.begin(), sq_line.end()), sq_line.end());
 		// Levenshtein distance must fit in a single byte in this implementation
-		if (sq_line.empty() || sq_line == last_line || sq_line.size() > 255) {
+		if (sq_line.empty() || sq_line == last_line || (!file_list.empty() && sq_line.size() > 255)) {
 			continue;
 		}
 		auto it = g_strings.find(sq_line);
@@ -1322,7 +1380,7 @@ int main(int argc, char* argv[])
 		if (next_id != c_bad_id && (it != g_strings.end() && it->second != next_id)) {
 			// Exact mismatch has no definitive solution because sq_line can be still close to next_id
 			const auto& sq = g_lines[next_id].sq_text;
-			if (levenshtein_distance(sq_line, sq) <= std::max<uint>(3, sq.size() * 1 / 3)) {
+			if (!file_list.empty() && levenshtein_distance(sq_line, sq) <= std::max<uint>(3, sq.size() * 1 / 3)) {
 				// TODO: back_buf implementation is outdated, prefer exact match for now
 				//force_ambi = true;
 				if (it->second != c_bad_id) {
@@ -1333,7 +1391,7 @@ int main(int argc, char* argv[])
 		if (next_id != c_bad_id && (it == g_strings.end() || it->second == c_bad_id)) {
 			// Fuzzy match of predicted next line
 			const auto& sq = g_lines[next_id].sq_text;
-			if (levenshtein_distance(sq_line, sq) <= sq.size() * 2 / 3) {
+			if (!file_list.empty() && levenshtein_distance(sq_line, sq) <= sq.size() * 2 / 3) {
 				sq_line = sq;
 				it = g_strings.find(sq_line);
 			}
@@ -1379,7 +1437,7 @@ int main(int argc, char* argv[])
 					return a < b;
 				});
 				for (uint j = 0; j < result.size(); j++) {
-					for (uint i = 0; i < result[j].size(); i++) {
+					for (uint i = 0; i < std::min<std::size_t>(255, result[j].size()); i++) {
 						s_char_columns[i].resize(result.size());
 						s_char_columns[i][j] = result[j][i];
 					}
@@ -1661,6 +1719,11 @@ int main(int argc, char* argv[])
 			std::cerr << "Eval speed: ";
 			std::cerr << uint(10 / (g_stats->eval_time.load() / count / 1e6)) / 10. << "/s (total: ";
 			std::cerr << count << ")" << std::endl;
+		}
+		// Time spent in preparation for eval
+		if (auto count = g_stats->lag_count.load()) {
+			std::cerr << "Eval delay: ~";
+			std::cerr << g_stats->lag_time.load() / count / 1000 / 1000. << "s (total: " << count << ")" << std::endl;
 		}
 		ui64 tr_count = 0;
 		for (auto& line : g_lines) {
