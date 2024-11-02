@@ -4,6 +4,7 @@
 #include "sampling.h"
 #include "tools/tiny_sha1.hpp"
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cmath>
@@ -84,7 +85,7 @@ double cosine_similarity(const std::vector<float>& id1, double sum1, std::vector
 
 decltype(g_replaces) make_name_replaces(std::string_view text)
 {
-	static const std::vector<std::pair<std::vector<std::string>, std::vector<std::string>>> s_suffix_map{
+	static constexpr std::pair<std::array<const char*, 4>, std::array<const char*, 4>> s_suffix_map[]{
 		// clang-format off
 		{{"さん"}, {"-san"}},
 		{{"君", "くん"}, {"-kun"}},
@@ -98,13 +99,14 @@ decltype(g_replaces) make_name_replaces(std::string_view text)
 
 	decltype(g_replaces) result;
 
-	for (const auto& [orig_name, tr_name] : g_speakers) {
+	for (const auto& [orig_name, pair] : g_dict) {
 		// Filter non-names (TODO: this should be much more complicated)
+		const auto& [tr_name, tr_ann] = pair;
 		if (tr_name.empty() || tr_name.find_first_of("?& ") + 1)
 			continue;
 		std::string_view name = orig_name;
 		name -= ":";
-		std::size_t fpos = s_suffix_map.size(), pos = 0;
+		std::size_t fpos = std::size(s_suffix_map), pos = 0;
 		std::vector<char> features(fpos + 1, 0);
 		while (pos < text.size()) {
 			// TODO: convert tr_name to hiragana/katakana and use for search as well
@@ -114,9 +116,9 @@ decltype(g_replaces) make_name_replaces(std::string_view text)
 			pos += name.size();
 			bool found = false;
 			// Test each suffix in set
-			for (std::size_t f = 0; f < s_suffix_map.size(); f++) {
+			for (std::size_t f = 0; f < std::size(s_suffix_map); f++) {
 				for (const auto& suf : s_suffix_map[f].first) {
-					if (text.substr(pos).starts_with(suf)) {
+					if (suf && text.substr(pos).starts_with(suf)) {
 						found = true;
 						features[f] |= 1;
 						fpos = f;
@@ -142,10 +144,11 @@ decltype(g_replaces) make_name_replaces(std::string_view text)
 			result.emplace_back(from, from);
 			continue;
 		}
-		for (std::size_t f = 0; f < s_suffix_map.size(); f++) {
+		for (std::size_t f = 0; f < std::size(s_suffix_map); f++) {
 			if (!features[f]) {
 				for (const auto& tr_sfx : s_suffix_map[f].second) {
-					result.emplace_back(from + tr_sfx, to);
+					if (tr_sfx)
+						result.emplace_back(from + tr_sfx, to);
 				}
 			}
 		}
@@ -154,38 +157,10 @@ decltype(g_replaces) make_name_replaces(std::string_view text)
 	return result;
 }
 
-// Compose KV-cache filename from segment name, line pos and hashed history+tr_text
-fs::path get_cache_file(llama_model* model, const fs::path& parent, uint hpos, line_id id)
-{
-	std::string result = g_lines.segs[id.first].src_name;
-	result += "_";
-	result += std::to_string(id.second);
-	result += "_";
-	char buf[42]{};
-	auto& tr_text = g_lines[id].tr_text;
-	{
-		sha1::SHA1 s;
-		int info[] = {llama_n_embd(model), llama_n_head(model), llama_n_layer(model), llama_n_vocab(model)};
-		s.processBytes(&info, sizeof(info));
-		// Only IDs are hashed which is supposed to distinguish only "position" in the history
-		s.processBytes(g_history.data(), hpos * sizeof(g_history[0]));
-		s.processBytes(tr_text.data(), tr_text.size());
-		s.processBytes(&hpos, 4);
-		std::uint32_t digest[5];
-		s.getDigest(digest);
-		std::snprintf(buf, 41, "%08x%08x%08x%08x%08x", digest[0], digest[1], digest[2], digest[3], digest[4]);
-	}
-	result += buf;
-	result += ".kvseq8";
-	if (result.size() > 255)
-		result.erase(0, result.size() - 255);
-	return parent / g_lines.segs[id.first].src_name / result;
-}
-
 // Return true if some meaningful CJK character is found (TODO: potentially incomplete)
-bool check_cjk_line(line_id id)
+bool check_cjk_line(std::u16string_view sq_text)
 {
-	for (char16_t c : g_lines[id].sq_text) {
+	for (char16_t c : sq_text) {
 		// clang-format off
 		if ((c >= '0' && c <= '9') || // ASCII numbers and letters are included too
 			(c >= 'a' && c <= 'z') ||
@@ -207,14 +182,42 @@ bool check_cjk_line(line_id id)
 	return false;
 }
 
-std::vector<std::pair<uint, float>> get_recollections(gpt_params& params, line_id id, std::size_t pos_max)
+// Workaround for llama.cpp tokenize which expects correct utf-8
+bool is_valid_utf8(std::string_view str)
+{
+	uint cont = 0;
+	for (const char& c : str) {
+		if ((c & 0x80) == 0) {
+			// ASCII
+			if (cont)
+				return false;
+		} else if ((c & 0xc0) == 0x80) {
+			if (!cont)
+				return false;
+			cont--;
+		} else if (cont) {
+			return false;
+		} else if ((c & 0xe0) == 0xc0) {
+			cont = 1;
+		} else if ((c & 0xf0) == 0xe0) {
+			cont = 2;
+		} else if ((c & 0xf8) == 0xf0) {
+			cont = 3;
+		} else {
+			return false;
+		}
+	}
+	return !cont;
+}
+
+std::vector<std::pair<uint, float>> get_recollections(common_params& params, line_id id, std::size_t pos_max)
 {
 	if (pos_max >= g_history.size()) {
 		// Handle underflow from subtraction
 		return {};
 	}
 
-	if (!check_cjk_line(id)) {
+	if (params.model_draft == "." || !check_cjk_line(g_lines[id].sq_text)) {
 		// Don't process lines like "..."
 		return {};
 	}
@@ -232,12 +235,9 @@ std::vector<std::pair<uint, float>> get_recollections(gpt_params& params, line_i
 
 	for (std::size_t i = 0; i <= pos_max; i++) {
 		// TODO: filter repetitions in the cause of history loops
-		if (!check_cjk_line(g_history[i]))
+		if (!check_cjk_line(g_lines[g_history[i]].sq_text))
 			continue;
 		auto& hline = g_lines[g_history[i]];
-		// Skip lines with annotations as it looks like it can do more harm than good
-		if (!hline.pre_ann.empty() || !hline.post_ann.empty())
-			continue;
 		// More recent history appears first
 		auto& rel = rel_map.emplace_front();
 		rel.pos = i;
@@ -263,7 +263,7 @@ std::vector<std::pair<uint, float>> get_recollections(gpt_params& params, line_i
 		// Cut elements with low similarity
 		auto& [pos, sim] = rel;
 		tokens += g_lines[g_history[pos]].tokens;
-		if (tokens > params.n_ctx / 8 + 0u) {
+		if (tokens > params.n_ctx / 8u - 1) {
 			break;
 		}
 		result.emplace_back(pos, sim);
@@ -271,11 +271,26 @@ std::vector<std::pair<uint, float>> get_recollections(gpt_params& params, line_i
 
 	// Sort result by history order
 	std::sort(result.begin(), result.end());
-	// TODO: cache results for each g_history entry
 	return result;
 }
 
-bool translate(gpt_params& params, line_id id, tr_cmd cmd)
+std::vector<llama_token> llama_tokenize(llama_model* model, std::string_view str, bool add_special, bool parse_special = false)
+{
+	std::vector<llama_token> result;
+	result.resize(llama_n_ctx_train(model));
+	result.resize(llama_tokenize(model, str.data(), str.size(), result.data(), result.size(), add_special, parse_special));
+	return result;
+}
+
+std::string llama_token_to_piece(llama_model* model, llama_token t, bool special = true)
+{
+	std::string result;
+	result.resize(1024);
+	result.resize(llama_token_to_piece(model, t, result.data(), result.size(), 0, special));
+	return result;
+}
+
+bool translate(common_params& params, line_id id, tr_cmd cmd)
 {
 	static const auto s_main_tid = std::this_thread::get_id();
 	static std::atomic<uint> stop_sig = -1; // stop signal for thread, id.second to start discarding from
@@ -305,17 +320,19 @@ bool translate(gpt_params& params, line_id id, tr_cmd cmd)
 	};
 
 	// Initialize llama.cpp
-	static const auto init_result = [&]() -> llama_init_result {
+	static const auto init_result = [&]() -> common_init_result {
 		llama_backend_init();
 		llama_numa_init(params.numa);
-		return llama_init_from_gpt_params(params);
+		return common_init_from_params(params);
 	}();
 
 	static const auto model = init_result.model;
 	static const auto ctx = init_result.context;
 
 	// Load embedding model if specified as "draft model"
-	static const auto init_result_e = [&]() -> llama_init_result {
+	static const auto init_result_e = [&]() -> common_init_result {
+		if (params.model_draft == ".")
+			return {nullptr, nullptr, {}};
 		if (params.model_draft.empty())
 			return init_result;
 		auto eparams = params;
@@ -323,14 +340,14 @@ bool translate(gpt_params& params, line_id id, tr_cmd cmd)
 		eparams.n_gpu_layers = eparams.n_gpu_layers_draft;
 		eparams.lora_adapters.clear();
 		eparams.embedding = true;
-		eparams.n_ctx = 512;
-		eparams.n_ubatch = 512;
-		eparams.n_batch = 512;
+		eparams.n_ctx = 0;		// auto
+		eparams.n_ubatch = 512; //def
+		eparams.n_batch = 2048; //def
 		eparams.pooling_type = LLAMA_POOLING_TYPE_NONE;
-		eparams.flash_attn = false;
+		eparams.flash_attn = true;
 		eparams.cache_type_k = "f16";
 		eparams.cache_type_v = "f16";
-		return llama_init_from_gpt_params(eparams);
+		return common_init_from_params(eparams);
 	}();
 
 	static const auto emodel = init_result_e.model;
@@ -341,6 +358,10 @@ bool translate(gpt_params& params, line_id id, tr_cmd cmd)
 	static uint decoded = 0;				// Number of token successfully llama_decode()'d
 	static uint segment = -1;				// Current segment
 	static uint hist_pos = -1;				// Position in g_history corresponding to chunks[0]
+	static uint prompt_size = 0;			// Number of prompt tokens + reserved area for recollections
+	static float penalty_scale = 1.f;
+
+	static std::map<line_id, std::vector<std::uint8_t>> recollections;
 
 	// Something like "$HOME/.cache/VNSleuth/GameXXX"
 	static const fs::path s_cache_path = []() {
@@ -365,22 +386,20 @@ bool translate(gpt_params& params, line_id id, tr_cmd cmd)
 
 	static const struct _init_t {
 		explicit operator bool() const { return model && ctx; }
-		_init_t(gpt_params&)
+		_init_t(common_params&)
 		{
 			if (!model || !ctx)
 				return;
 			if (llama_model_has_encoder(model))
 				throw std::runtime_error("Decoder-only model expected");
 			fs::create_directories(s_cache_path / "__embd");
-			for (auto& seg : g_lines.segs)
-				fs::create_directories(s_cache_path / seg.src_name);
 		}
 		~_init_t()
 		{
 			join_worker(0);
-			if (ectx != ctx)
+			if (ectx && ectx != ctx)
 				llama_free(ectx);
-			if (emodel != model)
+			if (emodel && emodel != model)
 				llama_free_model(emodel);
 			llama_free(ctx);
 			llama_free_model(model);
@@ -420,32 +439,19 @@ bool translate(gpt_params& params, line_id id, tr_cmd cmd)
 	}
 
 	// Remove first message block (returns number of tokens to erase)
-	static auto eject_first = [&params](uint last_count) -> uint {
+	static auto eject_first = [&params]() -> uint {
 		if (chunks.empty()) {
 			return 0;
 		}
 
 		auto count = chunks.front();
 		chunks.pop_front();
-		if (decoded > 0u + params.n_keep) {
+		if (decoded > prompt_size) {
 			// std::cerr << "*Used cells: " << llama_get_kv_cache_used_cells(ctx) << std::endl;
 			// std::cerr << "*Decoded: " << decoded << std::endl;
 			// std::cerr << "*Tokens: " << tokens.size() << std::endl;
-			const auto p0 = params.n_keep;
-			const auto p1 = params.n_keep + count;
-			// Copy fragment to the sequence 1 and shift it to zero pos
-			llama_kv_cache_seq_cp(ctx, 0, 1, p0, p1);
-			llama_kv_cache_seq_add(ctx, 1, p0, p1, -p0);
-			auto fname = (std::lock_guard{g_mutex}, get_cache_file(model, s_cache_path, hist_pos, g_history.at(hist_pos)));
-			if (!fs::is_regular_file(fname)) {
-				// Need to update K-shift and stuff
-				llama_kv_cache_update(ctx);
-				llama_state_seq_save_file(ctx, fname.c_str(), 1, tokens.data() + params.n_keep + last_count, count);
-			}
-			// Undo shifting cells; delete sequence 1
-			llama_kv_cache_seq_add(ctx, 1, 0, count, p0);
-			llama_kv_cache_seq_keep(ctx, 0);
-			// Finally remove cells
+			const auto p0 = prompt_size;
+			const auto p1 = prompt_size + count;
 			if (!llama_kv_cache_seq_rm(ctx, 0, p0, p1))
 				throw std::runtime_error("llama_kv_cache_seq_rm 1");
 			llama_kv_cache_seq_add(ctx, 0, p1, -1, 0u - count);
@@ -460,7 +466,7 @@ bool translate(gpt_params& params, line_id id, tr_cmd cmd)
 			}
 			if (decoded > 0u + params.n_ctx)
 				throw std::out_of_range("ctx underflow");
-			if (decoded < 0u + params.n_keep)
+			if (decoded < prompt_size)
 				throw std::out_of_range("eject_first failed");
 		}
 		hist_pos++;
@@ -470,44 +476,49 @@ bool translate(gpt_params& params, line_id id, tr_cmd cmd)
 	static const auto unload = []() {
 		uint count = 0;
 		while (!chunks.empty()) {
-			count += eject_first(count);
+			count += eject_first();
 		}
 		tokens.clear();
+		recollections.clear();
 		decoded = 0;
 		llama_kv_cache_clear(ctx);
 		hist_pos = 0;
 	};
 
 	// Remove last message block(s)
-	static auto eject_bunch = [&params](uint i, bool locked = true) {
+	static auto eject_bunch = [&params](uint i, [[maybe_unused]] bool locked = true) {
 		if (i > chunks.size()) {
 			unload();
 			if (llama_add_bos_token(model)) {
 				tokens.push_back(llama_token_bos(model));
 			}
-
-			for (auto& t : llama_tokenize(model, params.prompt + example, false)) {
-				tokens.push_back(t);
+			std::string buf;
+			buf.resize(256);
+			buf.resize(llama_model_desc(model, buf.data(), buf.size()));
+			if (buf.starts_with("command-r ")) {
+				penalty_scale = 3.f;
 			}
 
+			tokens += llama_tokenize(model, params.prompt + example, false);
 			params.n_keep = tokens.size();
+			prompt_size = tokens.size();
+			if (ectx) {
+				// Make space for recollections (currently constant)
+				prompt_size += params.n_ctx / 8u;
+				tokens.resize(prompt_size, llama_token_nl(model));
+			}
 			return;
 		}
 		while (i--) {
 			auto count = chunks.back();
 			chunks.pop_back();
-			// Purge KV cache file for discarded translation (TODO: reduce fs access?)
-			if (auto hpos = hist_pos + chunks.size(); locked && hpos < g_history.size()) {
-				auto fname = get_cache_file(model, s_cache_path, hpos, g_history[hpos]);
-				fs::remove(fname);
-			}
 			if (decoded == tokens.size()) {
 				if (!llama_kv_cache_seq_rm(ctx, 0, decoded - count, -1))
 					throw std::runtime_error("llama_kv_cache_seq_rm last");
 				if (llama_get_kv_cache_used_cells(ctx) + 0u != tokens.size() - count)
 					throw std::runtime_error("used cells in eject_bunch");
 				decoded -= count;
-				if (decoded > tokens.size() || decoded < 0u + params.n_keep)
+				if (decoded > tokens.size() || decoded < prompt_size)
 					throw std::out_of_range("eject_bunch decoded=" + std::to_string(decoded));
 			}
 			tokens.resize(tokens.size() - count);
@@ -515,18 +526,18 @@ bool translate(gpt_params& params, line_id id, tr_cmd cmd)
 		}
 	};
 
-	// Eject old translations if necessary keeping only 7/8 of the context full (TODO)
-	static auto eject_start = [&params](bool defrag = true) -> bool {
+	// Eject old translations if necessary
+	static auto eject_start = [&params](bool defrag = false) -> bool {
 		uint count = 0;
-		while (tokens.size() - count + params.n_predict > params.n_ctx * 7 / 8 - 1u) {
+		while (tokens.size() - count + params.n_predict * 2 > params.n_ctx - 1u) {
 			if (chunks.empty()) {
 				std::cerr << "Prompt too big or context is too small" << std::endl;
 				return false;
 			}
-			count += eject_first(count);
+			count += eject_first();
 		}
 
-		tokens.erase(tokens.begin() + params.n_keep, tokens.begin() + (params.n_keep + count));
+		tokens.erase(tokens.begin() + prompt_size, tokens.begin() + (prompt_size + count));
 		// Apply defrag
 		if (defrag) {
 			llama_kv_cache_defrag(ctx);
@@ -541,7 +552,7 @@ bool translate(gpt_params& params, line_id id, tr_cmd cmd)
 		if (params.verbosity && !tt.empty())
 			std::fprintf(stderr, "%s[tokens:%zu,%d] push %zu tokens: '%s'\n", g_esc.reset, tokens.size(), +front, tt.size(), text.c_str());
 		if (front) {
-			tokens.insert(tokens.begin() + params.n_keep + chunks.front(), tt.begin(), tt.end());
+			tokens.insert(tokens.begin() + prompt_size + chunks.front(), tt.begin(), tt.end());
 			chunks.front() += tt.size();
 		} else {
 			tokens.insert(tokens.end(), tt.begin(), tt.end());
@@ -599,51 +610,6 @@ bool translate(gpt_params& params, line_id id, tr_cmd cmd)
 		g_lines[id].tokens = front ? chunks.front() : chunks.back();
 	};
 
-	static auto load_cache = [&params](uint pos, uint hpos, line_id id) -> uint {
-		auto fname = get_cache_file(model, s_cache_path, hpos, id);
-		if (!fs::is_regular_file(fname))
-			return 0;
-		auto dummy = std::vector<int>(params.n_ctx);
-		std::size_t count = -1;
-		//auto s0 = std::chrono::steady_clock::now();
-		if (!llama_state_seq_load_file(ctx, fname.c_str(), 1, dummy.data(), dummy.size(), &count)) {
-			std::cerr << "Tokens: " << tokens.size() << std::endl;
-			std::cerr << "Token count: " << llama_get_kv_cache_token_count(ctx) << std::endl;
-			std::cerr << "Cells used: " << llama_get_kv_cache_used_cells(ctx) << std::endl;
-			throw std::runtime_error("Failed to load KV cache: " + fname.string());
-		}
-		//std::cerr << (std::chrono::steady_clock::now() - s0).count() / 1e9 << "s" << std::endl;
-		dummy.resize(count);
-		if (auto expected = g_lines[id].tokens; expected != count)
-			throw std::runtime_error("Bad KV cache size: " + fname.string());
-		if (!std::equal(dummy.begin(), dummy.end(), tokens.begin() + pos)) {
-			std::cerr << std::endl << "First mismatch pos: ";
-			auto [mis1, mis2] = std::mismatch(dummy.begin(), dummy.end(), tokens.begin() + pos);
-			std::cerr << (mis1 - dummy.begin()) << std::endl;
-			std::cerr << "Expected tokens: '";
-			for (auto it = mis2; it != tokens.begin() + pos + count; it++) {
-				std::cerr << "[" << *it << "]";
-				auto str = llama_token_to_piece(ctx, *it, false);
-				REPLACE(str, "\n", "\\n");
-				std::cerr << str;
-			}
-			std::cerr << "'" << std::endl << "  Loaded tokens: '";
-			for (auto it = mis1; it != dummy.end(); it++) {
-				std::cerr << "[" << *it << "]";
-				auto str = llama_token_to_piece(ctx, *it, false);
-				REPLACE(str, "\n", "\\n");
-				std::cerr << str;
-			}
-			std::cerr << "'" << std::endl;
-			throw std::runtime_error("Bad KV cache data: " + fname.string());
-		}
-		llama_kv_cache_seq_add(ctx, 1, 0, -1, +pos);
-		llama_kv_cache_seq_add(ctx, 0, pos, -1, +count);
-		llama_kv_cache_seq_cp(ctx, 1, 0, pos, pos + count);
-		llama_kv_cache_seq_keep(ctx, 0);
-		return count;
-	};
-
 	static auto decode_internal = [&params](uint count) -> void {
 		if (params.verbosity) {
 			std::cerr << "Decoding:" << g_esc.buf;
@@ -653,7 +619,7 @@ bool translate(gpt_params& params, line_id id, tr_cmd cmd)
 			else
 				end_it = tokens.end();
 			for (auto it = tokens.begin() + decoded; it != end_it; it++) {
-				auto str = llama_token_to_piece(ctx, *it, false);
+				auto str = llama_token_to_piece(model, *it, false);
 				REPLACE(str, "\n", "\\n");
 				std::cerr << str;
 			}
@@ -665,7 +631,7 @@ bool translate(gpt_params& params, line_id id, tr_cmd cmd)
 			throw std::runtime_error("decode(): too many tokens: " + std::to_string(count));
 		while (uint bsize = std::min<uint>(count, params.n_batch)) {
 			// TODO: cannot properly interrupt by is_stopped, but probably not relevant anymore
-			auto res = llama_decode(ctx, llama_batch_get_one(&tokens[decoded], bsize, decoded, 0));
+			auto res = llama_decode(ctx, llama_batch_get_one(&tokens[decoded], bsize));
 			if (res == 1) {
 				llama_kv_cache_defrag(ctx);
 				continue;
@@ -686,78 +652,69 @@ bool translate(gpt_params& params, line_id id, tr_cmd cmd)
 		}
 	};
 
-	static auto decode = [&params](uint injected = 0) -> void {
+	static auto decode = [&params](line_id id, uint injected = 0) -> void {
 		if (tokens.size() == decoded)
 			return;
 		if (decoded == 0) {
 			// Decode prompt first
-			decode_internal(params.n_keep);
-		}
-		uint skip = params.n_keep;
-		uint hpos = hist_pos;
-		for (uint i = 0; i < injected; i++) {
-			// Skip injected tokens at the beginning
-			skip += chunks.at(i);
-			decoded += chunks[i];
-		}
-		while (decoded < tokens.size()) {
-			// Check if already decoded
-			if (skip < decoded) {
-				skip += chunks.at(injected + hpos - hist_pos);
-				hpos++;
-				continue;
+			decode_internal(prompt_size);
+		} else if (injected) {
+			if (id == c_bad_id) {
+				std::fill(tokens.begin() + params.n_keep, tokens.begin() + prompt_size, llama_token_nl(model));
 			}
-			// Load cached ids first
-			if (std::lock_guard lock(g_mutex); hpos < g_history.size()) {
-				if (auto res = load_cache(decoded, hpos, g_history[hpos])) {
-					decoded += res;
-					hpos++;
-					skip = decoded;
-					continue;
+			llama_kv_cache_seq_rm(ctx, 0, params.n_keep, prompt_size);
+			auto batch = llama_batch_init(injected, 0, 1);
+			for (uint i = 0; i < injected; i++) {
+				common_batch_add(batch, tokens[params.n_keep + i], params.n_keep + i, {0}, false);
+			}
+			if (llama_decode(ctx, batch) != 0)
+				throw std::runtime_error("llama_decode failed (injected)");
+			llama_batch_free(batch);
+			llama_synchronize(ctx);
+			llama_kv_cache_seq_cp(ctx, 0, 1, params.n_keep, prompt_size);
+			if (id != c_bad_id) {
+				// Limit recollections cache (TODO: more careful cleanup)
+				while (recollections.size() >= params.n_draft * 2u) {
+					recollections.erase(recollections.begin());
 				}
+				// Cache recollections
+				std::vector<std::uint8_t> buf;
+				buf.resize(llama_state_seq_get_size(ctx, 1));
+				buf.resize(llama_state_seq_get_data(ctx, buf.data(), buf.size(), 1));
+				recollections[id] = std::move(buf);
 			}
-			// TODO: optimize by combining chunks
-			decode_internal(chunks.at(injected + hpos - hist_pos));
-			hpos++;
-			skip = decoded;
+			llama_kv_cache_seq_keep(ctx, 0);
 		}
+		decode_internal(tokens.size() - decoded);
 		if (llama_get_kv_cache_used_cells(ctx) + 0u != decoded) {
 			throw std::runtime_error("used cells after decode");
 		}
 	};
 
 	static auto inject_recollections = [&params](line_id id) -> uint {
+		if (!ectx)
+			return 0;
+		const auto found = recollections.find(id);
+		if (found != recollections.end()) {
+			llama_kv_cache_seq_rm(ctx, 0, params.n_keep, prompt_size);
+			llama_state_seq_set_data(ctx, found->second.data(), found->second.size(), 1);
+			llama_kv_cache_seq_cp(ctx, 1, 0, params.n_keep, prompt_size);
+			llama_kv_cache_seq_keep(ctx, 0);
+			return 0;
+		}
 		std::lock_guard lock(g_mutex);
 		uint injected = 0;
+		std::fill(tokens.begin() + params.n_keep, tokens.begin() + prompt_size, llama_token_nl(model));
 		if (auto inj_list = get_recollections(params, id, hist_pos - 1); !inj_list.empty()) {
-			for (auto it = inj_list.rbegin(); it != inj_list.rend(); it++) {
-				// Push front
+			for (auto it = inj_list.begin(); it != inj_list.end(); it++) {
 				auto iid = g_history[it->first];
-				chunks.emplace_front();
-				push_id(iid, true);
-				if (!load_cache(params.n_keep, it->first, iid))
-					throw std::runtime_error("Unexpected: Cache not found");
-				if (params.verbosity)
-					std::fprintf(stderr, "\t[sim=%.6f] Injected: %s%s\n", it->second, g_lines[iid].name.c_str(), g_lines[iid].text.c_str());
-				injected++;
+				auto tts = llama_tokenize(model, g_lines[iid].tr_text, false);
+				std::copy(tts.begin(), tts.end(), tokens.begin() + params.n_keep + injected);
+				injected += tts.size();
 			}
 		}
-		return injected;
-	};
-
-	static auto eject_recollections = [&params](uint injected) -> void {
-		if (const uint inj_count = std::accumulate(chunks.begin(), chunks.begin() + injected, 0u)) {
-			tokens.erase(tokens.begin() + params.n_keep, tokens.begin() + params.n_keep + inj_count);
-			chunks.erase(chunks.begin(), chunks.begin() + injected);
-			const auto p0 = params.n_keep;
-			const auto p1 = params.n_keep + inj_count;
-			if (!llama_kv_cache_seq_rm(ctx, 0, p0, p1))
-				throw std::runtime_error("llama_kv_cache_seq_rm injected");
-			llama_kv_cache_seq_add(ctx, 0, p1, -1, 0u - inj_count);
-			decoded -= inj_count;
-			if (llama_get_kv_cache_used_cells(ctx) + 0u != decoded)
-				throw std::runtime_error("used cells injected");
-		}
+		// Return constant number of tokens to decode
+		return prompt_size - params.n_keep;
 	};
 
 	// Compose embedding cache filename from the hash of prompt+text
@@ -794,9 +751,9 @@ bool translate(gpt_params& params, line_id id, tr_cmd cmd)
 			if (!line.embd.empty())
 				continue;
 			auto tt = llama_tokenize(emodel, "query: " + line.text, true);
-			if (tt.size() > 512)
-				throw std::runtime_error("line too big (embd)");
-			if (tsize + tt.size() > 512)
+			if (tt.size() > llama_n_ctx(ectx) - 1u)
+				tt.resize(llama_n_ctx(ectx) - 1u);
+			if (tsize + tt.size() > llama_n_ctx(ectx) - 1u)
 				break;
 			tsize += tt.size();
 			paths.emplace_back(std::move(fname));
@@ -808,13 +765,13 @@ bool translate(gpt_params& params, line_id id, tr_cmd cmd)
 			return;
 		llama_set_embeddings(ectx, true);
 		llama_set_causal_attn(ectx, false);
-		auto batch = llama_batch_init(512, 0, 1);
+		auto batch = llama_batch_init(llama_n_ctx(ectx), 0, 1);
 		for (uint i = 0; i < lines.size(); i++) {
 			for (uint j = 0; j < tokens[i].size(); j++) {
-				llama_batch_add(batch, tokens[i][j], j, {llama_seq_id(i + 1)}, true);
+				common_batch_add(batch, tokens[i][j], j, {llama_seq_id(i + 1)}, true);
 			}
 		}
-		if (llama_decode(ectx, batch) < 0)
+		if (llama_decode(ectx, batch) != 0)
 			throw std::runtime_error("llama_decode failed (embd)");
 		for (uint k = 0; k < tsize; k++) {
 			// Use simple sum of each token's embeddings (TODO)
@@ -846,7 +803,9 @@ bool translate(gpt_params& params, line_id id, tr_cmd cmd)
 	};
 
 	static auto load_embedding = [](line_id id) -> void {
-		auto esize = llama_n_embd(emodel);
+		if (!ectx)
+			return;
+		uint esize = llama_n_embd(emodel);
 		auto fname = get_embd_file(id);
 		auto& line = g_lines[id];
 		std::ifstream file(fname, std::ios::binary);
@@ -856,9 +815,9 @@ bool translate(gpt_params& params, line_id id, tr_cmd cmd)
 			line.embd.resize(esize);
 			line.embd_sqrsum = 0;
 			file.read(reinterpret_cast<char*>(line.embd.data()), esize * sizeof(float));
-			if (file.tellg() != esize * sizeof(float))
+			if (file.tellg() * sizeof(char) != esize * sizeof(float))
 				throw std::runtime_error("Truncated embd file " + fname);
-			for (int i = 0; i < esize; i++) {
+			for (uint i = 0; i < esize; i++) {
 				line.embd_sqrsum += double(line.embd[i]) * line.embd[i];
 			}
 		}
@@ -867,7 +826,7 @@ bool translate(gpt_params& params, line_id id, tr_cmd cmd)
 	static auto init_segment = [&]() -> void {
 		// Initialize segment: eject all first
 		eject_bunch(-1);
-		decode();
+		decode(c_bad_id);
 
 		// Invalidate embeddings
 		for (auto& line : g_lines) {
@@ -875,7 +834,7 @@ bool translate(gpt_params& params, line_id id, tr_cmd cmd)
 			line.embd_sqrsum = 0.;
 		}
 
-		if (auto env = std::getenv("VNSLEUTH_DUMP_SIMILARITY")) {
+		if (std::getenv("VNSLEUTH_DUMP_SIMILARITY")) {
 			g_history.clear();
 			std::ofstream dump(s_cache_path / (ctx == ectx ? "hdumpz.txt" : "hdump.txt"), std::ios_base::trunc);
 			dump << std::fixed;
@@ -883,7 +842,7 @@ bool translate(gpt_params& params, line_id id, tr_cmd cmd)
 			for (auto& line : g_lines) {
 				auto id = line.get_id();
 				g_history.push_back(id);
-				line.tokens = 512 / 32;
+				line.tokens = llama_n_ctx(ectx) / 32;
 				load_embedding(id);
 				auto recs = get_recollections(params, id, g_history.size() - 2);
 				std::sort(recs.begin(), recs.end(), [](auto& a, auto& b) { return a.second > b.second; });
@@ -908,20 +867,11 @@ bool translate(gpt_params& params, line_id id, tr_cmd cmd)
 			push_id(id);
 			// Check cache files
 			load_embedding(id);
-			auto fname = get_cache_file(model, s_cache_path, &id - g_history.data(), id);
-			if (!fs::is_regular_file(fname)) {
-				std::cerr << "Cache not found: " << fname << std::endl;
-				if (!eject_start())
-					throw std::runtime_error("eject_start init seg");
-				const uint injected = inject_recollections(id);
-				decode(injected);
-				eject_recollections(injected);
-			}
 		}
 
 		if (!eject_start())
 			throw std::runtime_error("eject_start init_seg");
-		decode();
+		decode(c_bad_id);
 	};
 
 	auto add_tail_finalize = [id]() -> void {
@@ -948,7 +898,7 @@ bool translate(gpt_params& params, line_id id, tr_cmd cmd)
 	}
 
 	if (cmd == tr_cmd::reload) {
-		if (id == c_bad_id) {
+		if (id == c_bad_id || !decoded || (decoded - prompt_size) < (params.n_ctx - prompt_size) / 3u) {
 			// Full reload
 			init_segment();
 			return true;
@@ -964,13 +914,9 @@ bool translate(gpt_params& params, line_id id, tr_cmd cmd)
 				chunks.emplace_back();
 				push_id(nid);
 				load_embedding(nid);
-				// TODO: allow restoring linear history as well, not just ejecting it
-				// Otherwise, reloaded lines are a bit inconsistent with the rest.
 				if (!eject_start())
 					throw std::runtime_error("eject_start reload");
-				const uint injected = inject_recollections(id);
-				decode(injected);
-				eject_recollections(injected);
+				decode(nid);
 			}
 		}
 		return true;
@@ -1022,6 +968,7 @@ bool translate(gpt_params& params, line_id id, tr_cmd cmd)
 		if (!(std::lock_guard{g_mutex}, line.tr_text.empty()))
 			continue;
 
+		auto lag0 = std::chrono::steady_clock::now();
 		std::string llama_out;
 		llama_out += line.pre_ann;
 		if (pid < id || line.tr_tts.empty())
@@ -1043,7 +990,7 @@ bool translate(gpt_params& params, line_id id, tr_cmd cmd)
 			llama_out.clear();
 			std::vector<std::string> tstrs;
 			for (auto t : line.tr_tts.back()) {
-				tstrs.emplace_back(llama_token_to_piece(ctx, t));
+				tstrs.emplace_back(llama_token_to_piece(model, t));
 				llama_out += tstrs.back();
 				pred_count++;
 				if (auto negpos = llama_out.find(g_neg); negpos + 1) {
@@ -1086,15 +1033,20 @@ bool translate(gpt_params& params, line_id id, tr_cmd cmd)
 
 		// Inject context temporarily, decode pending tokens
 		const uint injected = inject_recollections(pid);
-		decode(injected);
+		decode(pid, injected);
+		{
+			auto lag1 = std::chrono::steady_clock::now();
+			g_stats->lag_count++;
+			g_stats->lag_time += (lag1 - lag0).count() / 1000;
+		}
 
 		auto sparams = params.sparams;
 		if (!line.tr_tts.empty())
 			sparams.seed += std::accumulate(line.tr_tts.back().begin(), line.tr_tts.back().end(), line.tr_tts.size());
-		const auto sctx = gpt_sampler_init(model, sparams);
+		const auto sctx = common_sampler_init(model, sparams);
 		const bool use_grammar = !line.name.empty();
 		for (int i = 0; i < pred_count; i++)
-			gpt_sampler_accept(sctx, *(tokens.rbegin() + pred_count - i), use_grammar);
+			common_sampler_accept(sctx, *(tokens.rbegin() + pred_count - i), use_grammar);
 		static const auto real_isuffix = "\n" + isuffix;
 		const auto replaces = make_name_replaces(line.text);
 		std::size_t last_suf = llama_out.size();
@@ -1105,13 +1057,15 @@ bool translate(gpt_params& params, line_id id, tr_cmd cmd)
 			for (auto& vec : line.tr_tts) {
 				if (pred_count + 0u >= vec.size())
 					continue;
-				const auto token_str = llama_token_to_piece(ctx, vec[pred_count]);
+				const auto token_str = llama_token_to_piece(model, vec[pred_count]);
 
 				// Workaround for not penalizing certain patterns
 				static constexpr std::string_view s_no_penalty[]{
 					" \"",
-					" '",
-					" (",
+					" '", //
+					" (", //
+					" “", //
+					"”",  //
 					")",
 				};
 				if ((!line.name.empty() && llama_out == spker) || pred_count == 0) {
@@ -1131,27 +1085,27 @@ bool translate(gpt_params& params, line_id id, tr_cmd cmd)
 				}
 				if (std::equal(tokens.end() - pred_count, tokens.end(), vec.begin())) {
 					// Don't penalize pure space if it appeared here before
-					auto tstr = llama_token_to_piece(ctx, vec[pred_count], false);
+					auto tstr = llama_token_to_piece(model, vec[pred_count], false);
 					if (!isuffix.ends_with(" ") && token_str == " ")
 						continue;
 					// Penalize specific token (except newline)
 					if (tstr != "\n")
-						logits[vec[pred_count]] -= 1.f;
+						logits[vec[pred_count]] -= penalty_scale;
 					// Penalize pure space (experimentally observed to appear sometimes and break the line)
-					static const auto s_tspace = llama_tokenize(ctx, " ", false);
-					logits[s_tspace[0]] -= 1.f;
+					static const auto s_tspace = llama_tokenize(model, " ", false);
+					logits[s_tspace[0]] -= penalty_scale;
 				}
 			}
-			auto token_id = gpt_sampler_sample(sctx, ctx, -1);
+			auto token_id = common_sampler_sample(sctx, ctx, -1);
 			g_stats->raw_samples++;
 			auto stamp1 = std::chrono::steady_clock::now();
 			g_stats->sample_time += (stamp1 - stamp0).count() / 1000;
-			static const auto s_tnl = llama_tokenize(ctx, "\n", false);
+			static const auto s_tnl = llama_tokenize(model, "\n", false);
 			if (++pred_count > params.n_predict)
 				token_id = s_tnl[0]; // Force newline if size exceeded
 			if (llama_token_is_eog(model, token_id))
 				token_id = s_tnl[0]; // Force newline on EOT/EOS
-			auto token_str = llama_token_to_piece(ctx, token_id);
+			auto token_str = llama_token_to_piece(model, token_id);
 			if (token_str == "\n")
 				token_id = s_tnl[0]; // Fix alternative newline (TODO: correct workaround)
 			if (std::count(token_str.begin(), token_str.end(), '\n') > 0u + token_str.ends_with("\n")) {
@@ -1167,7 +1121,7 @@ bool translate(gpt_params& params, line_id id, tr_cmd cmd)
 			}
 			tokens.push_back(token_id);
 
-			gpt_sampler_accept(sctx, token_id, use_grammar);
+			common_sampler_accept(sctx, token_id, use_grammar);
 			llama_out += token_str;
 			int to_decode = 1;
 			int to_penalize = -1;
@@ -1189,10 +1143,10 @@ bool translate(gpt_params& params, line_id id, tr_cmd cmd)
 				speaker = speaker.substr(0, speaker.find(":") + 1);
 				if (!speaker.empty()) {
 					std::lock_guard lock(g_mutex);
-					spker = g_speakers[line.name] = speaker;
+					spker = g_dict[line.name].first = speaker;
 				}
 			}
-			if (!spker.empty() || line.name.empty()) {
+			if ((!spker.empty() || line.name.empty()) && is_valid_utf8(llama_out)) {
 				// TODO: implement separate replace system whith takes original text into account
 				auto fixed = llama_out;
 				// Apply name suffix replaces as well
@@ -1231,7 +1185,7 @@ bool translate(gpt_params& params, line_id id, tr_cmd cmd)
 					if (mistt == tt.end()) {
 						// If nothing to replace, re-evaluate last token and penalize token that was following it
 						// TODO: better logic
-						if (llama_token_to_piece(ctx, *mis, false) != " ")
+						if (llama_token_to_piece(model, *mis, false) != " ")
 							to_penalize = *mis;
 						to_decode++;
 					}
@@ -1248,9 +1202,9 @@ bool translate(gpt_params& params, line_id id, tr_cmd cmd)
 					decoded -= to_remove;
 					if (!llama_kv_cache_seq_rm(ctx, 0, p0, -1))
 						throw std::runtime_error("llama_kv_cache_seq_rm replaces");
-					gpt_sampler_reset(sctx);
+					common_sampler_reset(sctx);
 					for (auto& t : tt)
-						gpt_sampler_accept(sctx, t, use_grammar);
+						common_sampler_accept(sctx, t, use_grammar);
 					llama_out = std::move(fixed);
 					pred_count += to_decode - to_remove - 1;
 					token_str.clear();
@@ -1267,7 +1221,7 @@ bool translate(gpt_params& params, line_id id, tr_cmd cmd)
 			if (decoded >= tokens.size())
 				throw std::runtime_error("eval: bad pointer: " + std::to_string(decoded));
 			stamp0 = std::chrono::steady_clock::now();
-			if (auto result = llama_decode(ctx, llama_batch_get_one(&tokens[decoded], to_decode, decoded, 0))) {
+			if (auto result = llama_decode(ctx, llama_batch_get_one(&tokens[decoded], to_decode))) {
 				std::cerr << "llama_decode failed: " << result << std::endl;
 				return false;
 			}
@@ -1283,19 +1237,17 @@ bool translate(gpt_params& params, line_id id, tr_cmd cmd)
 				throw std::out_of_range("ctx overflow");
 			logits = llama_get_logits(ctx);
 			if (to_penalize >= 0) {
-				logits[to_penalize] -= 1.f;
+				logits[to_penalize] -= penalty_scale;
 			} else if (to_penalize == -2) {
 				for (int i = 0; i < llama_n_vocab(model); i++) {
 					if (llama_token_get_text(model, i)[0] == '-') {
-						logits[i] -= 1.f;
+						logits[i] -= penalty_scale;
 					}
 				}
 			}
 		}
 
-		// Remove injected tokens
-		eject_recollections(injected);
-		gpt_sampler_free(sctx);
+		common_sampler_free(sctx);
 		g_stats->sample_count += pred_count;
 		if (is_stopped(pid) && !llama_out.ends_with("\n") && std::this_thread::get_id() == s_main_tid)
 			std::cout << std::endl; // Stop current line
@@ -1361,7 +1313,7 @@ bool translate(gpt_params& params, line_id id, tr_cmd cmd)
 			}
 			uint ahead = 0;
 			if (params.verbosity)
-				std::fprintf(stderr, "%s[id:%u:%u] Thread entry (%d)\n", g_esc.reset, next.first, next.second, cmd);
+				std::fprintf(stderr, "%s[id:%u:%u] Thread entry (%d)\n", g_esc.reset, next.first, next.second, int(cmd));
 			while (!is_stopped() && next != c_bad_id) {
 				if (next <= last) {
 					if (!translate(params, next, tr_cmd::translate)) {
@@ -1416,21 +1368,8 @@ bool translate(gpt_params& params, line_id id, tr_cmd cmd)
 				}
 				g_lines.advance(start);
 			}
-			// Restore loaded history
 			if (llama_get_kv_cache_used_cells(ctx) + 0u != decoded) {
-				throw std::runtime_error("used cells before rollback");
-			}
-			while (!g_stop && hist_pos > old_pos.back()) {
-				auto hid = g_history[--hist_pos];
-				chunks.emplace_front();
-				push_id(hid, true);
-				auto res = load_cache(params.n_keep, hist_pos, hid);
-				if (!res)
-					throw std::runtime_error("Unexpected: cache not found");
-				decoded += res;
-				if (llama_get_kv_cache_used_cells(ctx) + 0u != decoded) {
-					throw std::runtime_error("used cells after rollback");
-				}
+				throw std::runtime_error("used cells before thread exit");
 			}
 			if (params.verbosity)
 				std::fprintf(stderr, "%s[id:%u:?] Thread exit\n", g_esc.reset, next.first);

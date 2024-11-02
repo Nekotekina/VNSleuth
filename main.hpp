@@ -87,6 +87,14 @@ std::basic_string_view<Char>& operator-=(std::basic_string_view<Char, Tr>& sv, c
 	return sv;
 }
 
+template <typename T>
+std::vector<T>& operator+=(std::vector<T>& vec, const std::vector<T>& vec_add)
+{
+	for (auto& e : vec_add)
+		vec.emplace_back(e);
+	return vec;
+}
+
 // Operation mode
 inline enum class op_mode {
 	print_only = 0, // Legacy mode (passthrough)
@@ -271,8 +279,8 @@ inline std::bitset<0x10000> g_chars{};
 // Furigana database (word ; reading)
 inline std::set<std::pair<std::string, std::string>> g_furigana;
 
-// Speaker database (name -> translation)
-inline std::map<std::string, std::string, std::less<>> g_speakers{{"？？？:", "???:"}};
+// Dictionary (name -> translation; annotation)
+inline std::map<std::string, std::pair<std::string, std::string>, std::less<>> g_dict{{"？？？:", {"???:", ""}}};
 
 // Default replace rules to reduce token count and also fix potential issues with borked translations
 inline const std::vector<std::pair<std::string, std::string>> g_default_replaces{
@@ -357,7 +365,7 @@ enum class tr_cmd {
 };
 
 // Obvious.
-bool translate(struct gpt_params& params, line_id id, tr_cmd cmd = tr_cmd::translate);
+bool translate(struct common_params& params, line_id id, tr_cmd cmd = tr_cmd::translate);
 
 struct alignas(4096) vnsleuth_stats {
 	std::atomic<ui64> start_time;
@@ -378,6 +386,8 @@ struct alignas(4096) vnsleuth_stats {
 	std::atomic<ui64> batch_count;
 	std::atomic<ui64> batch_time; // In µs
 	std::atomic<ui64> eval_time;  // In µs
+	std::atomic<ui64> lag_time;	  // In µs
+	std::atomic<ui64> lag_count;  // For eval_lag
 };
 
 static_assert(std::is_trivially_copyable_v<vnsleuth_stats>);

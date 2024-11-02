@@ -23,14 +23,15 @@ I made VNSleuth for myself out of curiosity for new tech and also laziness. Desp
 1. Modern GPU with at least 16 GiB of VRAM for translating texts at acceptable speed. 4060 Ti or RX 7600 XT might work although the latter is probably the slowest option. It's possible to run partially (lower VRAM req.) or completely on CPU, without any GPU at all, but it's way too slow and power-hungry.
 1. For translation, it's currently designed to use locally-running [LLMs](https://en.wikipedia.org/wiki/Large_language_model), very massive, resource-hungry neural networks. There are many varieties of them freely available online on huggingface. Technically you can use any model that's supported by [llama.cpp](https://github.com/ggerganov/llama.cpp), I'm currently testing [Gemma-2 27B](https://huggingface.co/bartowski/gemma-2-27b-it-GGUF) — you can download any GGUF file that fits in your GPU memory (you only need one). I use mainly IQ4_XS quant for my tests — note that the model requires more VRAM. For 16 GiB VRAM, I recommend gemma-2-27b-it-IQ3_M.gguf. MODEL_PATH refers to the .gguf file of the model you download.
 1. Additional model for embeddings (used internally for searching relevant lines), referred as E5_PATH. [multilingual-e5](https://huggingface.co/chris-code/multilingual-e5-large-Q8_0-GGUF).
-1. SSD with significant amount of space. Usage depends on the model. ~500 G should be enough for one big VN. It will probably be made optional in future.
 1. Make sure `xsel` utility is installed on your system, via `sudo apt install xsel` on Ubuntu, for example. `xclipmonitor` uses xsel internally and assumes Xorg. Other requirements include `git`, C++ compiler (g++), CMake.
 1. Build `vnsleuth` with CMake and proper support for your GPU as documented in llama.cpp repository. Example for RX 7600 XT (**warning**: other GPUs should use different parameters)
 ```bash
 git clone --recursive https://github.com/Nekotekina/VNSleuth
 cd VNSleuth
 mkdir build
-# Build with support for gfx1102 architecture (just an example)
+# Build for NVidia
+cmake -B build -DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=native -DLLAMA_BUILD_COMMON=ON -DCMAKE_BUILD_TYPE=Release && cmake --build build --config Release -j $(nproc)
+# Build for AMD with support for gfx1102 architecture (just an example)
 HIPCXX="$(hipconfig -l)/clang" HIP_PATH="$(hipconfig -R)" cmake -S . -B build -DGGML_HIPBLAS=ON -DAMDGPU_TARGETS=gfx1102 -DCMAKE_BUILD_TYPE=Release && cmake --build build --config Release -- -j $(nproc)
 # Install an executable symlink to ~/bin (completely optional)
 ln -sf "$(realpath ./build/vnsleuth)" "${HOME}/bin/vnsleuth"
@@ -41,11 +42,12 @@ make -C tools/xclipmonitor install
 ```
 
 ## Workflow
-1. Determine whether your VN's engine is supported.
+1. For a single text file ~/abcd.txt: `export LN=~/abcd ; xclipmonitor lastfile "$LN" | vnsleuth "$LN.txt" -m MODEL_PATH -md E5_PATH -co`, default prompt and empty names file will be created automatically but may be edited afterwards. Otherwise, determine whether your VN's engine is supported.
 
 | Engine | Script location | Notes |
 |:-------:|:-------:|:-------:|
-| Buriko/ETH | data01000.arc | Supported |
+| (Not a VN) | (Single .txt file) | LN or other book |
+| Buriko/ETH | Specify directory | Contains ~ data01000.arc |
 
 2. Assuming the game location `~/Games/Game/`, run `export P=~/Games/Game && vnsleuth "$P" --check` to initialize __vnsleuth directory. You should see the number of script lines, dumped furigana and other technical information.
 2. Make sure `Game/__vnsleuth/__vnsleuth_names.txt` was created and filled with all encountered names. Optionally, you can fill some of them manually. This is not required as VNSleuth will attempt to translate them automatically and fill this file accordingly, but that process may fail sometimes due to the nature of LLMs. Add English names after `:`, without spaces, and make sure the line ends with another `:`.

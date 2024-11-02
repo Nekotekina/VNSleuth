@@ -124,9 +124,9 @@ void add_line(int choice, std::string name, std::string text)
 
 	if (!line.name.empty() && choice == 0) {
 		// Remove annoying suffixes from names (possibly requires manual editing of names.txt)
-		auto found = g_speakers.find(line.name);
+		auto found = g_dict.find(line.name);
 		auto prev = found;
-		while (prev != g_speakers.begin()) {
+		while (prev != g_dict.begin()) {
 			prev = std::prev(prev);
 			if (found->first.starts_with(prev->first - ":") && prev->first.size() < line.name.size())
 				line.name = prev->first;
@@ -137,10 +137,6 @@ void add_line(int choice, std::string name, std::string text)
 	for (char32_t c : text_it->first)
 		g_chars.set(c);
 
-	// Check max length of squeezed string
-	if (text_it->first.size() > 255)
-		throw std::runtime_error("Line too long: " + line.text);
-
 	if (id.second == 0) {
 		auto [it, ok2] = g_start_strings.emplace(text_it->first, id);
 		if (!ok2)
@@ -148,7 +144,7 @@ void add_line(int choice, std::string name, std::string text)
 	}
 
 	if (!line.name.empty() && !choice)
-		g_speakers.emplace(line.name, std::string());
+		g_dict[line.name];
 }
 
 // Add furigana
