@@ -48,6 +48,7 @@ make -C tools/xclipmonitor install
 |:-------:|:-------:|:-------:|
 | (Not a VN) | (Single .txt file) | LN or other book |
 | Buriko/ETH | Specify directory | Contains ~ data01000.arc |
+| ExHIBIT v3 | Specify directory | Contains rld/*.rld files |
 
 2. Assuming the game location `~/Games/Game/`, run `export P=~/Games/Game && vnsleuth "$P" --check` to initialize __vnsleuth directory. You should see the number of script lines, dumped furigana and other technical information.
 2. Make sure `Game/__vnsleuth/__vnsleuth_names.txt` was created and filled with all encountered names. Optionally, you can fill some of them manually. This is not required as VNSleuth will attempt to translate them automatically and fill this file accordingly, but that process may fail sometimes due to the nature of LLMs. Add English names after `:`, without spaces, and make sure the line ends with another `:`.

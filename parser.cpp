@@ -40,6 +40,45 @@ bool is_text_bytes(std::string_view data)
 	return true;
 }
 
+void dump_hex_sjis(std::string_view data, std::string_view fname)
+{
+	std::ofstream dump("__vnsleuth/__vnsleuth_dump_" + std::string(fname), std::ios::trunc);
+	if (!dump.is_open())
+		return;
+	std::size_t offset = 0, prev = 0;
+	auto newline = [&]() {
+		if (offset) {
+			if (offset - prev < 32)
+				return;
+			dump << std::endl;
+		}
+		dump << "0x";
+		for (uint i = 7; ~i; i--) {
+			dump << "0123456789abcdef"[(offset >> (i * 4)) % 16];
+		}
+		dump << ": ";
+		prev = offset;
+	};
+	newline();
+	while (offset < data.size()) {
+		const unsigned char c = data[offset];
+		if (c > 0x7f) {
+			auto s = from_sjis(data.substr(offset, 1));
+			if (s.empty() && data[offset + 1] & -32) {
+				s = from_sjis(data.substr(offset, 2));
+				if (s.size() >= 2) {
+					dump << s;
+					offset += 2;
+					continue;
+				}
+			}
+		}
+		dump << "0123456789ABCDEF"[c >> 4] << "0123456789ABCDEF"[c & 0xf] << " ";
+		offset++;
+		newline();
+	}
+}
+
 void add_segment(const std::string& name, std::string_view data)
 {
 	if (!g_lines.segs.empty() && g_lines.segs.back().lines.empty()) {
@@ -196,9 +235,20 @@ std::string parse_ruby_eth(const std::string& text)
 }
 
 // To avoid parsing all archives, limit the set of possible candidates
-static const std::unordered_set<std::string_view> script_locations{
-	{"data01000.arc"},
+static constexpr const char* archive_locs[]{
+	"data01[0-9]{3}.arc",
+	"data010.arc",
 };
+
+bool match_location(const std::string& name, const auto& locs)
+{
+	for (const char* loc : locs) {
+		std::regex rx(loc);
+		if (std::regex_match(name, rx))
+			return true;
+	}
+	return false;
+}
 
 // Externally provided key for ExHIBIT files (zero key by default = no encryption)
 char g_exhibit_key[1024]{};
@@ -206,26 +256,27 @@ char g_exhibit_key[1024]{};
 void script_parser::read_segments(const std::string& name)
 {
 	// Detect script format then parse appropriately
-	const bool is_text = is_text_bytes(data);
-
 	std::multimap<std::string, parser_func_t, natural_order_less> sorted_archive;
-	if (!is_text && script_locations.count(name)) {
+	if (match_location(name, archive_locs) && !is_text_bytes(data)) {
 		auto arc = read_archive();
 		sorted_archive = decltype(sorted_archive)(std::make_move_iterator(arc.begin()), std::make_move_iterator(arc.end()));
 	}
 
-	if (!is_text && !sorted_archive.empty()) {
+	static thread_local std::string parent;
+	if (!sorted_archive.empty()) {
 		for (auto& [n, f] : sorted_archive) {
 			script_parser parser(f(true, nullptr).data);
 			//if (g_mode == op_mode::print_info)
 			//	std::ofstream("__vnsleuth/__vnsleuth_dump_" + n, std::ios::trunc | std::ios::binary).write(parser.data.data(), parser.data.size());
+			parent = name;
 			parser.read_segments(n);
+			parent.clear();
 		}
 		return;
 	}
 
-	if (!is_text && data.starts_with("\0DLR"sv)) {
-		// ExHIBIT script file decryption function
+	if (name.ends_with(".rld") && data.starts_with("\0DLR"sv)) {
+		// ExHIBITv3 decryption function
 		static auto xor_view = [](std::size_t off, char* dst, const char* src, std::size_t count) {
 			for (std::size_t i = 0; i < count; i++) {
 				dst[i] = src[i];
@@ -236,21 +287,53 @@ void script_parser::read_segments(const std::string& name)
 			}
 		};
 
-		auto [int1, int2, int3, ok] = read_le<4u, 4u, 4u>(4);
-		if (ok) {
-			std::string fn = "__vnsleuth/__vnsleuth_dump_";
-			fn += name - ".rld";
-			std::ofstream f(fn, std::ios::trunc | std::ios::binary);
-			f.write(data.data(), 0x10);
+		// TODO: parse bytecode properly
+		auto [ver, int2, int3, ok] = read_le<4u, 4u, 4u>(4);
+		if (ok && ver == 3) {
+			add_segment(name, data);
+			std::size_t pos = 0;
+			std::string dump;
 			char c;
-			std::size_t pos = 0x10;
 			while (read_le(c, pos, xor_view))
-				f.write(&c, 1);
+				dump += c;
+			//dump_hex_sjis(dump, name - ".rld");
+			pos = 0x10;
+			while (true) {
+				pos = dump.find("\xff\xff\xff\xff\xff\xff\xff\xff\0\0\0\0\0\0\0\0"sv, pos);
+				if (pos >= dump.size())
+					break;
+				pos += 16;
+				if (dump.compare(pos, 8, "\0\0\0\0\xff\xff\xff\xff"sv) == 0)
+					pos += 8;
+				std::string_view name_ = dump.data() + pos;
+				std::string name = from_sjis(name_);
+				if (pos + name_.size() + 1 >= dump.size())
+					break;
+				std::string text = from_sjis(dump.data() + pos + name_.size() + 1);
+
+				if (name == "*")
+					name.clear();
+				while (auto p = text.find("《") + 1) {
+					p -= 1;
+					auto x = text.find("》", p + 3);
+					if (g_mode == op_mode::print_info)
+						std::cerr << "Found tag: " << text.substr(p, x + 3 - p) << std::endl;
+					text.erase(p, x + 3 - p);
+				}
+				if (!text.empty() && is_text_bytes(text))
+					add_line(0, std::move(name), std::move(text));
+			}
 			return;
+		}
+		if (ok && ver == 2) {
+			// TODO
+		}
+		if (ok && ver == 1) {
+			// TODO
 		}
 	}
 
-	if (!is_text && data.starts_with("BurikoCompiledScriptVer1.00\0"sv)) {
+	if (data.starts_with("BurikoCompiledScriptVer1.00\0"sv)) {
 		std::uint32_t add_off{}, off{}, op{};
 		if (!read_le(add_off, 0x1c) || data.size() < add_off)
 			return;
@@ -439,7 +522,7 @@ void script_parser::read_segments(const std::string& name)
 			return false;
 		return true;
 	};
-	if (auto [first_op, ok] = read_le<4u>(0); ok && first_op < 0x500 /* TODO: what is max op value? */) {
+	if (auto [first_op, ok] = read_le<4u>(0); ok && parent.ends_with(".arc") && first_op < 0x500 /* TODO: what is max op value? */) {
 		add_segment(name, data);
 		if (try_parse_eth_v1())
 			return;
