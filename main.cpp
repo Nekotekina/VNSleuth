@@ -900,7 +900,7 @@ int main(int argc, char* argv[])
 			}
 		}
 
-		if (argv[0] == "--check"sv) {
+		if (!g_lines.segs.empty() && argv[0] == "--check"sv) {
 			// Dump text
 			std::ofstream dump(vnsleuth_path / "__vnsleuth_dump.txt", std::ios::trunc);
 			for (auto& line : g_lines) {

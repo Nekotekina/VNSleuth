@@ -21,7 +21,7 @@ std::string from_sjis(std::string_view src)
 {
 	static const iconvpp::converter conv("UTF-8", "SJIS-WIN", true, 1024);
 	std::string dst;
-	conv.convert(src.data(), dst);
+	conv.convert(src, dst);
 	return dst;
 }
 
@@ -123,14 +123,19 @@ void add_line(int choice, std::string name, std::string text)
 	line.segment = id.first;
 
 	if (!line.name.empty() && choice == 0) {
-		// Remove annoying suffixes from names (possibly requires manual editing of names.txt)
+		g_dict[line.name];
+		// Choose shortest name amongst equal translations (requires manual editing of names.txt)
+		// Useful to get rid of meaningless suffixes
+		// TODO: requires restart to take effect
+		// TODO: it repeats a lot of computation
+		// To fix it, it shouldn't modify line.name
 		auto found = g_dict.find(line.name);
-		auto prev = found;
-		while (prev != g_dict.begin()) {
-			prev = std::prev(prev);
-			if (found->first.starts_with(prev->first - ":") && prev->first.size() < line.name.size())
-				line.name = prev->first;
+		for (auto& [name, pair] : g_dict) {
+			if (found->second.first == pair.first && name.size() < found->first.size() && line.name.find(name) + 1) {
+				found = g_dict.find(name);
+			}
 		}
+		line.name = found->first;
 	}
 
 	// Remember all encountered characters in a bitmap (doesn't include names)
@@ -142,9 +147,6 @@ void add_line(int choice, std::string name, std::string text)
 		if (!ok2)
 			it->second = c_bad_id;
 	}
-
-	if (!line.name.empty() && !choice)
-		g_dict[line.name];
 }
 
 // Add furigana
@@ -300,7 +302,7 @@ void script_parser::read_segments(const std::string& name)
 					break;
 				auto [str, ok2] = read_le<0>(addr + add_off);
 				if (ok2) {
-					stack.emplace_back(from_sjis(str));
+					stack.emplace_back(from_sjis(str.data()));
 				} else {
 					stack.clear(); // TODO
 				}
@@ -399,7 +401,7 @@ void script_parser::read_segments(const std::string& name)
 				auto [str, ok2] = read_le<0>(+addr);
 				if (!ok2)
 					return false;
-				stack.emplace_back(from_sjis(str));
+				stack.emplace_back(from_sjis(str.data()));
 				if (off_max > addr)
 					off_max = addr;
 				continue;
