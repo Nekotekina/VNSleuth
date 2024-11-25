@@ -119,11 +119,11 @@ void add_line(int choice, std::string name, std::string text)
 	REPLACE(text, "\r", "");
 	while (auto pos = text.find_first_of("\n") + 1)
 		text[pos - 1] = '\t';
-	// Replace special ":" character with full-width variant
-	REPLACE(text, ":", "：");
 
 	if (!name.empty()) {
-		// Add (special) character ":" after name
+		// Replace special ":" character with full-width variant
+		REPLACE(text, ":", "：");
+
 		REPLACE(name, "\r", "");
 		REPLACE(name, "\n", " ");
 		REPLACE(name, ":", "：");
@@ -138,7 +138,7 @@ void add_line(int choice, std::string name, std::string text)
 			// Use placeholder for empty names
 			name = "？？？";
 		}
-
+		// Add (special) character ":" after name
 		name += ":";
 	}
 

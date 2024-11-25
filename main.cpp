@@ -149,7 +149,12 @@ std::u16string squeeze_line(const std::string& line)
 				utf32 |= (ch & 0x3f);
 			}
 		}
-		if (!next.empty() && static_cast<char16_t>(utf32) != prev) {
+		// Saturate and normalize full-width to ASCII
+		char16_t utf16 = std::min(utf32, U'\xffff');
+		if (utf16 >= u'！' && utf16 <= u'～')
+			utf16 -= u'！' - '!';
+
+		if (!next.empty() && utf16 != prev) {
 			// Skip spaces (both ASCII and full-width) and control characters
 			if (next == "　"sv || next == " "sv)
 				continue;
@@ -157,12 +162,24 @@ std::u16string squeeze_line(const std::string& line)
 				prev = 0;
 				continue;
 			}
-			// Append non-repeating code (truncate higher bits)
-			r += static_cast<char16_t>(utf32);
-			prev = r.back();
+			// Append non-repeating code
+			r += utf16;
+			prev = utf16;
 		}
 	}
 	return r;
+}
+
+std::u32string to_utf32(const std::string& line)
+{
+	std::wstring_convert<std::codecvt_utf8<char32_t>, char32_t> converter;
+	return converter.from_bytes(line);
+}
+
+std::string to_utf8(const std::u32string& line)
+{
+	std::wstring_convert<std::codecvt_utf8<char32_t>, char32_t> converter;
+	return converter.to_bytes(line);
 }
 
 // Return the "cost" of changing strings s to t
@@ -763,40 +780,151 @@ int main(int argc, char* argv[])
 
 	if (dir_name.ends_with(".txt") && file_list.empty()) {
 		// Load a single raw text file
-		std::ifstream txt(dir_name);
-		std::string line;
+		std::ifstream txt(dir_name, std::ios::binary);
+		std::string data(fs::file_size(dir_name) + 1, '\n');
+		txt.read(data.data(), data.size() - 1);
 		auto& seg = g_lines.segs.emplace_back();
 		g_lines.segs_by_name[".txt"] = 0;
 		seg.src_name = ".txt";
 		seg.cache_name = "__vnsleuth_text.txt";
-		while (std::getline(txt, line)) {
+		std::vector<std::u32string> lines{1};
+		std::u32string all_lines = to_utf32(data);
+		const bool no_squash = std::getenv("VNSLEUTH_NO_SQUASH");
+		for (std::size_t p = 0; p < all_lines.size();) {
+			const std::size_t end = all_lines.find_first_of(U"\n✏", p);
+			std::u32string line = all_lines.substr(p, end - p);
+			p = end + 1;
+			REPLACE(line, U"（）", U""); // Remove empty furigana from certain formats
+			REPLACE(line, U"《》", U"");
+			REPLACE(line, U"()", U"");
 			// Trim spaces
-			REPLACE(line, "\r", "");
-			while (line.ends_with(" ") || line.ends_with("　")) {
-				if (line.ends_with(" "))
-					line -= " ";
-				else
-					line -= "　";
+			line.resize(line.find_last_not_of(U" 　\t\r") + 1);
+			line.erase(0, line.find_first_not_of(U" 　\t"));
+			if (line.empty()) {
+				continue;
 			}
-			while (line.starts_with(" ") || line.starts_with("　")) {
-				if (line.starts_with(" "))
-					line.erase(0, 1);
-				else
-					line.erase(0, 3);
-			}
-			if (line.starts_with("<") && line.ends_with(">")) {
+			REPLACE(line, U"  ", U" ");
+			REPLACE(line, U"　　", U"　");
+			if (line.starts_with(U"<") && line.ends_with(U">")) {
 				// TODO: skip html
 				continue;
 			}
-			REPLACE(line, ":", "：");
-			REPLACE(line, "  ", " ");
-			REPLACE(line, "　　", "　");
-			REPLACE(line, "（）", ""); // Remove empty furigana from certain formats
-			REPLACE(line, "《》", "");
-			REPLACE(line, "()", "");
+			static auto is_jp = [](char32_t c) -> bool {
+				// TODO: revise
+				if ((c >= 0x3040 && c <= 0x30ff) || // Hiragana, katakana
+					(c >= 0x4e00 && c <= 0x9fff) || // CJK ideograms
+					(c >= 0xf900 && c <= 0xfaff) || //
+					(c >= 0xff65 && c <= 0xff9f))	// Halfwidth kana
+					return true;
+				return false;
+			};
+			// Remove padding ASCII spaces within Japanese text
+			for (std::size_t i = 0; i < line.size();) {
+				if (line[i] == ' ' && i) {
+					if (is_jp(line[i - 1]) || is_jp(line[i + 1])) {
+						line.erase(i, 1);
+						continue;
+					}
+				}
+				// Transform certain full-width character to ASCII (due to anecdotal improvement observation)
+				if (line[i] == U'　' && i && !is_jp(line[i - 1]) /*&& !is_jp(line[i + 1])*/)
+					line[i] = ' ';
+				if (line[i] == U'、' && i && !is_jp(line[i - 1]))
+					line[i] = ',';
+				if (line[i] == U'．' && i && !is_jp(line[i - 1]))
+					line[i] = '.';
+				if (line[i] == U'＇' && i && !is_jp(line[i - 1]))
+					line[i] = '\'';
+				if (line[i] == U'？' && i && !is_jp(line[i - 1]) && line[i - 1] != U'？' && line[i - 1] != U'！')
+					line[i] = '?';
+				if (line[i] == U'！' && i && !is_jp(line[i - 1]) && line[i - 1] != U'？' && line[i - 1] != U'！')
+					line[i] = '!';
+				if (line[i] == U'：' && i && !is_jp(line[i - 1]))
+					line[i] = ':';
+				if (line[i] >= U'０' && line[i] <= U'９')
+					line[i] -= U'０' - '0';
+				if (line[i] >= U'Ａ' && line[i] <= U'Ｚ')
+					line[i] -= U'Ａ' - 'A';
+				if (line[i] >= U'ａ' && line[i] <= U'ｚ')
+					line[i] -= U'ａ' - 'a';
+				i++;
+			}
+			if (!line.empty() && !no_squash) {
+				// Check line squashing conditions
+				static constexpr std::array<char32_t, 3> braces[]{
+					U"「」", //
+					U"『』", //
+					U"【】", //
+					U"《》", //
+					U"〝〟", //
+				};
+				static auto is_open = [](std::u32string_view str) -> int {
+					std::u32string stack;
+					for (auto& c : str) {
+						for (auto& [open, close, _] : braces) {
+							if (c == open) {
+								stack.push_back(close);
+							} else if (c == close) {
+								if (!stack.ends_with(close))
+									return -1;
+								stack.pop_back();
+							}
+						}
+					}
+					return !stack.empty();
+				};
+				static auto has_speech = [](std::u32string_view str) -> bool {
+					for (auto& arr : braces) {
+						if (str.find_first_of(arr.data()) + 1)
+							return true;
+					}
+					return false;
+				};
+				static auto start_speech = [](std::u32string_view str) -> bool {
+					for (auto& [open, close, _] : braces) {
+						if (str.starts_with(open))
+							return true;
+					}
+					return false;
+				};
+				static auto end_speech = [](std::u32string_view str) -> bool {
+					for (auto& [open, close, _] : braces) {
+						if (str.ends_with(close))
+							return true;
+					}
+					return false;
+				};
+				const int prev_op = is_open(lines.back());
+				if (has_speech(lines.back()) && prev_op == 0) {
+					// Don't squash two speeches
+					// Also don't squash with lines not starting with text (TODO: fix jp-specific check)
+					if (start_speech(lines.back()) && end_speech(lines.back()) && is_jp(line[0])) {
+						if (is_open(line) == 0 && !start_speech(line)) {
+							lines.back() += line;
+							// Add sentinel to prevent further squashing
+							lines.emplace_back();
+							continue;
+						}
+					}
+				} else if (prev_op > 0) {
+					// Squash split speech
+					lines.back() += U"　";
+					lines.back() += line;
+					continue;
+				} else if (lines.back().ends_with(U'、') || lines.back().ends_with(',')) {
+					// Append speech after incomplete sentence
+					if (prev_op == 0 && start_speech(line)) {
+						lines.back() += line;
+						continue;
+					}
+				}
+			}
+			lines.emplace_back(std::move(line));
+		}
+		for (auto& line : lines) {
 			if (!line.empty()) {
 				extern void add_line(int choice, std::string name, std::string text);
-				add_line(0, "", std::move(line));
+				add_line(0, "", to_utf8(line));
 			}
 		}
 		const auto cache_path = vnsleuth_path / seg.cache_name;
@@ -1216,8 +1344,6 @@ int main(int argc, char* argv[])
 		update_input_time();
 		if (g_stop)
 			break;
-		// Preprocess special ":" character
-		REPLACE(line, ":", "：");
 		if (g_mode == op_mode::rt_llama) {
 			if (line.empty() || line.starts_with("\01")) {
 				// Process rewrite request: only last line is supported currently (TODO)
