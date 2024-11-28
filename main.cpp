@@ -1364,6 +1364,8 @@ int main(int argc, char* argv[])
 					return 1;
 				g_neg.clear();
 				g_stats->rt_rewrites++;
+				if (!translate(params, id_queue.back(), tr_cmd::kick))
+					return 1;
 				continue;
 			} else if (line == "\02" || line == "\b") {
 				// Process rewind request (^B)
