@@ -1866,7 +1866,8 @@ int main(int argc, char* argv[])
 		auto total_time = g_stats->last_time.load() - g_stats->start_time.load();
 		auto read_time0 = g_stats->rt_reading_ms.load() / 1000;
 		auto afk_time = std::accumulate(std::begin(g_stats->rt_afk_ms), std::end(g_stats->rt_afk_ms), ui64(0)) / 1000;
-		std::cerr << "Elapsed real: " << total_time / 36 / 100. << "h" << std::endl;
+		time_t start = g_stats->start_time.load();
+		std::cerr << "Started: " << std::put_time(std::localtime(&start), "%Y-%m-%d %X") << std::endl;
 		std::cerr << "Reading time: " << read_time0 / 36 / 100. << "h (";
 		std::cerr << 10000 * read_time0 / (1 + read_time0 + afk_time) / 100. << "%)" << std::endl;
 		std::cerr << "AFK time: " << afk_time / 36 / 100. << "h" << std::endl;
@@ -1907,6 +1908,10 @@ int main(int argc, char* argv[])
 			auto acpt = g_stats->raw_accepts.load() * 10000 / count / 100.;
 			auto disc = g_stats->raw_discards.load() * 10000 / count / 100.;
 			std::cerr << " (accept " << acpt << "%; discard " << disc << "%)" << std::endl;
+		}
+		if (total_time && tr_count) {
+			time_t end = g_stats->start_time.load() + total_time * 1000 / tr_count * g_lines.count_lines() / 1000;
+			std::cerr << "Estimated finish: " << std::put_time(std::localtime(&end), "%Y-%m-%d") << std::endl;
 		}
 	}
 

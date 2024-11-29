@@ -397,16 +397,16 @@ static_assert(alignof(vnsleuth_stats) >= sizeof(vnsleuth_stats));
 inline vnsleuth_stats* g_stats{};
 
 // Terminal colors
-inline struct escape_sequences {
-	const char reset[16] = "\033[0m";
-	const char orig[16] = "\033[0;33m"; // yellow
-	const char tran[16] = "\033[0;1m";	// bold
-	const char buf[16] = "\033[0;37m";
+inline const struct escape_sequences {
+	mutable char reset[16] = "\033[0m";
+	mutable char orig[16] = "\033[0;33m"; // yellow
+	mutable char tran[16] = "\033[0;1m";  // bold
+	mutable char buf[16] = "\033[0;37m";
 
-	void disable()
+	void disable() const
 	{
 		// Clear all strings
 		static_assert(std::is_trivially_copyable_v<escape_sequences>);
-		std::memset(this, 0, sizeof(*this));
+		std::memset(const_cast<escape_sequences*>(this), 0, sizeof(*this));
 	}
 } g_esc{};
