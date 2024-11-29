@@ -278,7 +278,14 @@ std::vector<llama_token> llama_tokenize(llama_model* model, std::string_view str
 {
 	std::vector<llama_token> result;
 	result.resize(llama_n_ctx_train(model));
-	result.resize(llama_tokenize(model, str.data(), str.size(), result.data(), result.size(), add_special, parse_special));
+	auto count = llama_tokenize(model, str.data(), str.size(), result.data(), result.size(), add_special, parse_special);
+	if (count < 0) {
+		result.resize(-count);
+		if (-count != llama_tokenize(model, str.data(), str.size(), result.data(), result.size(), add_special, parse_special))
+			throw std::runtime_error("llama_tokenize");
+	} else {
+		result.resize(count);
+	}
 	return result;
 }
 
