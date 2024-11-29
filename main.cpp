@@ -794,6 +794,10 @@ int main(int argc, char* argv[])
 			const std::size_t end = all_lines.find_first_of(U"\n✏", p);
 			std::u32string line = all_lines.substr(p, end - p);
 			p = end + 1;
+			REPLACE(line, U"・・・", U"・・"); // Preprocess dot sequence (accent)
+			REPLACE(line, U"（・・）", U"");   // Remove accent furigana
+			REPLACE(line, U"《・・》", U"");
+			REPLACE(line, U"(・・)", U"");
 			REPLACE(line, U"（）", U""); // Remove empty furigana from certain formats
 			REPLACE(line, U"《》", U"");
 			REPLACE(line, U"()", U"");
