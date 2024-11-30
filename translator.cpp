@@ -238,6 +238,9 @@ std::vector<std::pair<uint, float>> get_recollections(common_params& params, lin
 		if (!check_cjk_line(g_lines[g_history[i]].sq_text))
 			continue;
 		auto& hline = g_lines[g_history[i]];
+		// Exclude too big lines (TODO)
+		if (hline.tokens > std::min(255u, params.n_ctx / 8u / 4u))
+			continue;
 		// More recent history appears first
 		auto& rel = rel_map.emplace_front();
 		rel.pos = i;

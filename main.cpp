@@ -1088,20 +1088,22 @@ int main(int argc, char* argv[])
 
 			// Add optional dictionary from name annotations
 			params.prompt -= "<START>\n";
-			for (auto& [_, pair] : g_dict) {
-				if (!pair.second.empty()) {
-					params.prompt += "Dictionary:\n";
-					break;
-				}
-			}
+			bool add_dict = false;
 			for (auto& [orig, pair] : g_dict) {
 				auto& [tran, ann] = pair;
-				if (!ann.empty()) {
+				if (tran.empty())
+					continue;
+				if (!ann.empty() || (orig != "？？？" && file_list.empty())) {
+					if (!std::exchange(add_dict, true)) {
+						params.prompt += "Dictionary:\n";
+					}
 					params.prompt += orig - ":";
 					params.prompt += '\t';
 					params.prompt += tran - ":";
-					params.prompt += '\t';
-					params.prompt += ann;
+					if (!ann.empty()) {
+						params.prompt += '\t';
+						params.prompt += ann;
+					}
 					params.prompt += '\n';
 				}
 			}
