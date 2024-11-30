@@ -853,6 +853,27 @@ int main(int argc, char* argv[])
 					line[i] -= U'ａ' - 'a';
 				i++;
 			}
+			// Function to split too long strings
+			auto new_line = [&](std::u32string str) {
+				// When includes split indicator, real max_size is (max_size + 1)
+				static constexpr std::size_t max_size = 1023;
+				while (lines.back().size() > max_size) {
+					std::size_t new_size = max_size;
+					// Find convenient split position (dot or comma)
+					for (auto delim : {U'。', U'、', U'.', U';', U','}) {
+						if (auto pos = lines.back().rfind(delim, max_size - 1) + 1) {
+							new_size = pos;
+							break;
+						}
+					}
+					// Trim starting spaces after split position
+					auto next = lines.back().substr(lines.back().find_first_not_of(U"　 \t", new_size));
+					lines.back().resize(new_size);
+					lines.back() += U'↴';
+					lines.emplace_back(std::move(next));
+				}
+				lines.emplace_back(std::move(str));
+			};
 			if (!line.empty() && !no_squash) {
 				// Check line squashing conditions
 				static constexpr std::array<char32_t, 3> braces[]{
@@ -906,7 +927,7 @@ int main(int argc, char* argv[])
 						if (is_open(line) == 0 && !start_speech(line)) {
 							lines.back() += line;
 							// Add sentinel to prevent further squashing
-							lines.emplace_back();
+							new_line(U"");
 							continue;
 						}
 					}
@@ -923,7 +944,9 @@ int main(int argc, char* argv[])
 					}
 				}
 			}
-			lines.emplace_back(std::move(line));
+			new_line(std::move(line));
+			if (p >= all_lines.size())
+				new_line(U"");
 		}
 		for (auto& line : lines) {
 			if (!line.empty()) {
