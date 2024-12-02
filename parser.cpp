@@ -89,8 +89,8 @@ void add_segment(const std::string& name, std::string_view data)
 	auto& new_seg = g_lines.segs.emplace_back();
 	new_seg.src_name = name;
 	{
-		// Generate SHA1 hash for cache file name
-		// If some game update changes the script, it will result in creating a different cache file
+		// Generate SHA1 hash for translation file name
+		// If some game update changes the script, it will result in creating a different translation file
 		char buf[42]{};
 		sha1::SHA1 s;
 		s.processBytes(data.data(), data.size());

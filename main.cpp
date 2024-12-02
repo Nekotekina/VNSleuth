@@ -347,7 +347,7 @@ void update_names(const std::string& path)
 		}
 		names.close();
 		fs::rename(path_tmp, path);
-		// Workaround to make cache files always appear as last modified
+		// Workaround to make translation files always appear as last modified
 		fs::last_write_time(path, fs::last_write_time(path) - 1s);
 	} else {
 		std::cerr << "Failed to open: " << path << ".tmp" << std::endl;
@@ -403,7 +403,7 @@ std::pair<uint, uint> load_translation(uint seg, const fs::path& path, bool veri
 		return std::make_pair(0, 0);
 	}
 
-	// Extract cached translation
+	// Extract translation
 	line_id id{seg, 0};
 	std::string temp, text;
 	uint kept = 0;
@@ -508,9 +508,9 @@ int main(int argc, char* argv[])
 		auto argv = argv_;
 		std::cerr << "VNSleuth v0.5" << std::endl;
 		std::cerr << "Usage 0: " << argv[0] << " <game_directory> --color" << std::endl;
-		std::cerr << "\tUse existing translation cache only (only useful if it's complete)." << std::endl;
+		std::cerr << "\tUse existing translation only (only useful if it's complete)." << std::endl;
 		std::cerr << "Usage 1: " << argv[0] << " <game_directory> --check" << std::endl;
-		std::cerr << "\tPrint furigana, some information, initialize translation cache." << std::endl;
+		std::cerr << "\tPrint furigana, some information, initialize translation directory." << std::endl;
 		std::cerr << "Usage 2: " << argv[0] << " <game_directory> --color -m <model> [<LLAMA args>...]" << std::endl;
 		std::cerr << "\tStart translating in real time (recommended)." << std::endl;
 		std::cerr << "Nothing to do." << std::endl;
@@ -523,22 +523,21 @@ int main(int argc, char* argv[])
 
 	common_params params{};
 	params.n_gpu_layers = 999;
-	params.n_gpu_layers_draft = 999;
+	params.speculative.n_gpu_layers = 999;
 	params.flash_attn = 1; // FA is currently NEEDED for efficient GPU KV-cache saving/restoring
 	//params.cache_type_k = "q8_0";
 	//params.cache_type_v = "q8_0";
 	params.n_ctx = 4096;
 	params.n_batch = 2048;
 	params.n_predict = 128;
-	params.sparams.seed = 0;
-	params.sparams.temp = 0.2;
-	params.sparams.top_p = 0.3;
-	params.sparams.penalty_last_n = 64;
-	params.sparams.penalty_repeat = 1.1;
+	params.sampling.seed = 0;
+	params.sampling.temp = 0.2;
+	params.sampling.top_p = 0.3;
+	params.sampling.penalty_last_n = 64;
+	params.sampling.penalty_repeat = 1.1;
 	params.warmup = false;
 	params.model = ".";
-	params.model_draft = "";
-	params.n_keep = 6; // Used by background thread, number of lines to translate ahead of time
+	params.speculative.model = "";
 
 	// Basic param check
 	std::string dir_name = argv[1];
@@ -567,7 +566,6 @@ int main(int argc, char* argv[])
 			if (!example.ends_with("\n"))
 				example += '\n';
 		}
-		params.n_draft = params.n_keep;
 		if (g_mode == op_mode::rt_llama && params.model == ".")
 			g_mode = op_mode::rt_cached;
 	}
@@ -992,7 +990,7 @@ int main(int argc, char* argv[])
 				if (g_mode == op_mode::print_info || g_mode == op_mode::rt_cached || g_mode == op_mode::rt_llama) {
 					if (g_mode == op_mode::print_info) {
 						std::cerr << "Found data: " << new_seg.src_name << std::endl;
-						std::cerr << "Cache file: " << new_seg.cache_name;
+						std::cerr << "Translation: " << new_seg.cache_name;
 					}
 					auto cache_path = vnsleuth_path / new_seg.cache_name;
 					if (fs::is_regular_file(cache_path)) {
@@ -1032,7 +1030,7 @@ int main(int argc, char* argv[])
 			std::cerr << "Translation is incomplete." << std::endl;
 	}
 	if (is_broken) {
-		std::cerr << "Some cache files are damaged." << std::endl;
+		std::cerr << "Some translation files are damaged." << std::endl;
 	}
 
 	if (g_mode == op_mode::print_info) {
@@ -1252,7 +1250,7 @@ int main(int argc, char* argv[])
 			auto& line = g_lines[id];
 			if (line.tr_text.empty()) {
 				if (g_mode != op_mode::rt_llama) {
-					std::cerr << "Error: Translation cache is incomplete" << std::endl;
+					std::cerr << "Error: Translation is incomplete" << std::endl;
 					break;
 				}
 				lock.unlock();
@@ -1275,7 +1273,7 @@ int main(int argc, char* argv[])
 						out.replace(out.find(line.text, pref_pos), line.text.size(), apply_replaces(line.text, false, 0));
 						out.insert(0, g_esc.orig);
 					} else {
-						std::cerr << iprefix << " not found in translation cache." << std::endl;
+						std::cerr << iprefix << " not found in translation file." << std::endl;
 						return false;
 					}
 				} else {
@@ -1286,7 +1284,7 @@ int main(int argc, char* argv[])
 				static const auto real_isuffix = "\n" + isuffix + (isuffix.ends_with(" ") ? "" : " ");
 				const auto suff_pos = out.find(real_isuffix);
 				if (suff_pos + 1 == 0) {
-					std::cerr << isuffix << " not found in translation cache." << std::endl;
+					std::cerr << isuffix << " not found in translation file." << std::endl;
 					return false;
 				}
 				out.replace(suff_pos + 1, real_isuffix.size() - 1, g_esc.tran);
@@ -1511,15 +1509,24 @@ int main(int argc, char* argv[])
 					next_id = g_lines.next(prev_id);
 				}
 
+				for (uint i = kept_lines, t = 0; i <= prev_id.second; i++) {
+					// Full reset if roughly half of context is ejected
+					t += g_lines.segs[prev_id.first].lines[i].tokens;
+					if (t >= params.n_ctx / 2u) {
+						full_reload = true;
+						break;
+					}
+				}
+
 				if (full_reload) {
-					std::cerr << "Reloading cache..." << std::endl;
+					std::cerr << "Reloading translation..." << std::endl;
 					load_history(prev_id);
 					if (!translate(params, c_bad_id, tr_cmd::reload))
 						return 1;
 					if (!id_queue.empty() && prev_id != c_bad_id && prev_id.first != id_queue.back().first) {
 						id_queue.clear();
 					}
-					std::cerr << "Cache reloaded." << std::endl << std::flush;
+					std::cerr << "Translation reloaded." << std::endl << std::flush;
 				} else if (kept_lines + 1) {
 					// Optimized reload
 					prev_id = g_history.back();

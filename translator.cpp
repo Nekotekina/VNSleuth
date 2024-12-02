@@ -46,7 +46,7 @@ extern void update_segment(uint seg, bool upd_names, uint count);
 namespace fs = std::filesystem;
 
 //__attribute__((target("avx2")))
-double cosine_similarity(const std::vector<float>& id1, double sum1, std::vector<float>& id2, double sum2)
+double cosine_similarity(const std::vector<float>& id1, double sum1, const std::vector<float>& id2, double sum2)
 {
 	double sum = 0.0;
 	std::size_t len = id1.size();
@@ -217,7 +217,7 @@ std::vector<std::pair<uint, float>> get_recollections(common_params& params, lin
 		return {};
 	}
 
-	if (params.model_draft == "." || !check_cjk_line(g_lines[id].sq_text)) {
+	if (params.speculative.model == "." || !check_cjk_line(g_lines[id].sq_text)) {
 		// Don't process lines like "..."
 		return {};
 	}
@@ -341,13 +341,13 @@ bool translate(common_params& params, line_id id, tr_cmd cmd)
 
 	// Load embedding model if specified as "draft model"
 	static const auto init_result_e = [&]() -> common_init_result {
-		if (params.model_draft == ".")
+		if (params.speculative.model == ".")
 			return {nullptr, nullptr, {}};
-		if (params.model_draft.empty())
+		if (params.speculative.model.empty())
 			return init_result;
 		auto eparams = params;
-		eparams.model = std::move(eparams.model_draft);
-		eparams.n_gpu_layers = eparams.n_gpu_layers_draft;
+		eparams.model = std::move(params.speculative.model);
+		eparams.n_gpu_layers = params.speculative.n_gpu_layers;
 		eparams.lora_adapters.clear();
 		eparams.embedding = true;
 		eparams.n_ctx = 0;		// auto
@@ -683,9 +683,12 @@ bool translate(common_params& params, line_id id, tr_cmd cmd)
 			llama_synchronize(ctx);
 			llama_kv_cache_seq_cp(ctx, 0, 1, params.n_keep, prompt_size);
 			if (id != c_bad_id) {
-				// Limit recollections cache (TODO: more careful cleanup)
-				while (recollections.size() >= params.n_draft * 2u) {
-					recollections.erase(recollections.begin());
+				// Limit recollections cache
+				while (recollections.size() >= params.speculative.n_min * 2) {
+					if (recollections.begin()->first > id)
+						recollections.erase(std::prev(recollections.end()));
+					else
+						recollections.erase(recollections.begin());
 				}
 				// Cache recollections
 				std::vector<std::uint8_t> buf;
@@ -960,13 +963,7 @@ bool translate(common_params& params, line_id id, tr_cmd cmd)
 				throw std::runtime_error("tr_tts not found: " + g_lines[nid].text);
 			// tr_tts is not discarded here
 		}
-		// TODO: more accurate computation with accounting for context size
-		if (to_eject >= 10) {
-			// Full reset
-			init_segment();
-		} else {
-			eject_bunch(to_eject);
-		}
+		eject_bunch(to_eject);
 	} else {
 		return true;
 	}
@@ -1050,7 +1047,7 @@ bool translate(common_params& params, line_id id, tr_cmd cmd)
 			g_stats->lag_time += (lag1 - lag0).count() / 1000;
 		}
 
-		auto sparams = params.sparams;
+		auto sparams = params.sampling;
 		if (!line.tr_tts.empty())
 			sparams.seed += std::accumulate(line.tr_tts.back().begin(), line.tr_tts.back().end(), line.tr_tts.size());
 		const auto sctx = common_sampler_init(model, sparams);
@@ -1296,7 +1293,7 @@ bool translate(common_params& params, line_id id, tr_cmd cmd)
 	if (!is_stopped() && std::this_thread::get_id() == s_main_tid && g_mode == op_mode::rt_llama && id != c_bad_id) {
 		// Launch worker thread to continue translation in the background
 		// Check if thread is disabled:
-		if (params.n_draft <= 0)
+		if (params.speculative.n_min <= 0)
 			return true;
 		// Check if the next line is untranslated
 		if (auto next = g_lines.next(id); next != c_bad_id) {
@@ -1316,7 +1313,7 @@ bool translate(common_params& params, line_id id, tr_cmd cmd)
 			auto start = g_lines.next(id);
 			auto next = start;
 			auto last = id;
-			for (int i = 0; i < params.n_draft; i++) {
+			for (int i = 0; i < params.speculative.n_min; i++) {
 				last.second++;
 				if (g_lines.is_last(last))
 					break;
@@ -1347,8 +1344,8 @@ bool translate(common_params& params, line_id id, tr_cmd cmd)
 					}
 					if (ahead > INT_MAX)
 						throw std::runtime_error("Unexpected ahead: " + std::to_string(ahead));
-					for (int i = 0; i < params.n_draft; i++) {
-						if (ahead + i < params.n_draft + 0u) {
+					for (int i = 0; i < params.speculative.n_min; i++) {
+						if (ahead + i < params.speculative.n_min + 0u) {
 							last.second++;
 							if (g_lines.is_last(last))
 								break;
