@@ -1503,13 +1503,8 @@ int main(int argc, char* argv[])
 					if (id_queue.empty() || id_queue.back().first != prev_id.first || id_queue.back() < prev_id)
 						full_reload = true;
 				}
-				if (prev_id == c_bad_id && !id_queue.empty()) {
-					// Restore prev_id
-					prev_id = id_queue.back();
-					next_id = g_lines.next(prev_id);
-				}
 
-				for (uint i = kept_lines, t = 0; i <= prev_id.second; i++) {
+				for (uint i = kept_lines, t = 0; !full_reload && i <= g_history.back().second; i++) {
 					// Full reset if roughly half of context is ejected
 					t += g_lines.segs[prev_id.first].lines[i].tokens;
 					if (t >= params.n_ctx / 2u) {
@@ -1523,14 +1518,15 @@ int main(int argc, char* argv[])
 					load_history(prev_id);
 					if (!translate(params, c_bad_id, tr_cmd::reload))
 						return 1;
-					if (!id_queue.empty() && prev_id != c_bad_id && prev_id.first != id_queue.back().first) {
+					if (!id_queue.empty() && id_queue.back() != g_history.back())
 						id_queue.clear();
-					}
 					std::cerr << "Translation reloaded." << std::endl << std::flush;
 				} else if (kept_lines + 1) {
 					// Optimized reload
-					prev_id = g_history.back();
-					const uint to_eject = prev_id.second + 1 - kept_lines;
+					const uint to_eject = g_history.back().second + 1 - kept_lines;
+					// Fix history
+					while (g_history.back() > prev_id)
+						g_history.pop_back();
 					if (params.verbosity)
 						std::fprintf(stderr, "%s[] Reload: eject %u, keep %u\n", g_esc.reset, to_eject, kept_lines);
 					if (!translate(params, {0u, to_eject}, tr_cmd::eject))
@@ -1539,10 +1535,9 @@ int main(int argc, char* argv[])
 						return 1;
 				}
 
-				if (!id_queue.empty()) {
-					// Restore prev_id
-					prev_id = id_queue.back();
-					next_id = g_lines.next(prev_id);
+				if (!id_queue.empty() && id_queue.back() != g_history.back()) {
+					std::cerr << "Translation rewound.";
+					id_queue.clear();
 				}
 				if (prev_id != c_bad_id) {
 					// Edge case of reloading
