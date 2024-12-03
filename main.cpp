@@ -848,7 +848,7 @@ int main(int argc, char* argv[])
 			auto new_line = [&](std::u32string str) {
 				// When includes split indicator, real max_size is (max_size + 1)
 				static constexpr std::size_t max_size = 1023;
-				while (lines.back().size() > max_size) {
+				while (lines.back().size() > max_size + 1) {
 					std::size_t new_size = max_size;
 					// Find convenient split position (dot or comma)
 					for (auto delim : {U'。', U'、', U'.', U';', U','}) {
@@ -873,7 +873,12 @@ int main(int argc, char* argv[])
 					U"【】", //
 					U"《》", //
 					U"〝〟", //
+					U"()",	 //
+					U"[]",
+					U"（）", //
 				};
+				// Furigana, possibly ((thoughts))
+				static constexpr auto excl_braces = U"《(（"sv;
 				static auto is_open = [](std::u32string_view str) -> int {
 					std::u32string stack;
 					for (auto& c : str) {
@@ -881,8 +886,11 @@ int main(int argc, char* argv[])
 							if (c == open) {
 								stack.push_back(close);
 							} else if (c == close) {
-								if (!stack.ends_with(close))
-									return -1;
+								while (!stack.ends_with(close)) {
+									if (stack.empty())
+										return -1;
+									stack.pop_back();
+								}
 								stack.pop_back();
 							}
 						}
@@ -891,13 +899,17 @@ int main(int argc, char* argv[])
 				};
 				static auto has_speech = [](std::u32string_view str) -> bool {
 					for (auto& arr : braces) {
+						if (excl_braces.find_first_of(arr[0]) + 1)
+							continue;
 						if (str.find_first_of(arr.data()) + 1)
 							return true;
 					}
 					return false;
 				};
-				static auto start_speech = [](std::u32string_view str) -> bool {
+				static auto start_speech = [](std::u32string_view str, bool full = false) -> bool {
 					for (auto& [open, close, _] : braces) {
+						if (!full && excl_braces.find_first_of(open) + 1)
+							continue;
 						if (str.starts_with(open))
 							return true;
 					}
@@ -905,6 +917,8 @@ int main(int argc, char* argv[])
 				};
 				static auto end_speech = [](std::u32string_view str) -> bool {
 					for (auto& [open, close, _] : braces) {
+						if (excl_braces.find_first_of(open) + 1)
+							continue;
 						if (str.ends_with(close))
 							return true;
 					}
@@ -915,7 +929,7 @@ int main(int argc, char* argv[])
 					// Don't squash two speeches
 					// Also don't squash with lines not starting with text (TODO: fix jp-specific check)
 					if (start_speech(lines.back()) && end_speech(lines.back()) && is_jp(line[0])) {
-						if (is_open(line) == 0 && !start_speech(line)) {
+						if (is_open(line) == 0 && !start_speech(line, true)) {
 							lines.back() += line;
 							// Add sentinel to prevent further squashing
 							new_line(U"");
