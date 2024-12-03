@@ -411,18 +411,11 @@ std::pair<uint, uint> load_translation(uint seg, const fs::path& path, bool veri
 	bool is_broken = false;
 	g_lines.segs[seg].prev_segs.clear();
 	while (std::getline(cache, temp, '\n')) {
-		// Skip prompt+example (isn't stored anymore, it's an artifact)
 		if (temp.starts_with("SRC:")) {
-			// TODO: properly verify file format and JP: line integrity
 			continue;
 		}
 		if (temp.starts_with("PREV:")) {
 			g_lines.segs[seg].prev_segs.emplace_back(std::move(temp)).erase(0, 5);
-			continue;
-		}
-		if (temp.ends_with("\\")) {
-			// TODO
-			text.clear();
 			continue;
 		}
 		text += temp;
@@ -1373,7 +1366,7 @@ int main(int argc, char* argv[])
 			break;
 		if (g_mode == op_mode::rt_llama) {
 			if (line.empty() || line.starts_with("\01")) {
-				// Process rewrite request: only last line is supported currently (TODO)
+				// Process rewrite request
 				while (line.starts_with("\01")) {
 					line.erase(0, 1);
 				}
