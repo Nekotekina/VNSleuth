@@ -178,7 +178,7 @@ void add_line(int choice, std::string name, std::string text)
 	}
 
 	// Remember all encountered characters in a bitmap (doesn't include names)
-	for (char32_t c : text_it->first)
+	for (char16_t c : text_it->first)
 		g_chars.set(c);
 
 	if (id.second == 0) {

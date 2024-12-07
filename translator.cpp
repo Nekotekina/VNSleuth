@@ -517,6 +517,7 @@ bool translate(common_params& params, line_id id, tr_cmd cmd)
 				prompt_size += params.n_ctx / 8u;
 				tokens.resize(prompt_size, llama_token_nl(model));
 			}
+			std::cerr << "Permanent tokens: " << prompt_size << std::endl;
 			return;
 		}
 		while (i--) {

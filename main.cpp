@@ -1906,9 +1906,12 @@ int main(int argc, char* argv[])
 		auto afk_time = std::accumulate(std::begin(g_stats->rt_afk_ms), std::end(g_stats->rt_afk_ms), ui64(0)) / 1000;
 		time_t start = g_stats->start_time.load();
 		std::cerr << "Started: " << std::put_time(std::localtime(&start), "%Y-%m-%d %X") << std::endl;
-		std::cerr << "Reading time: " << read_time0 / 36 / 100. << "h (";
-		std::cerr << 10000 * read_time0 / (1 + read_time0 + afk_time) / 100. << "%)" << std::endl;
-		std::cerr << "AFK time: " << afk_time / 36 / 100. << "h" << std::endl;
+		std::cerr << "Reading time: " << read_time0 / 36 / 100. << "h";
+		for (uint i = 1; i < 5; i++) {
+			// One of these values might be more close to reading time but neither are accurate
+			std::cerr << ", " << std::accumulate(g_stats->rt_afk_ms + 0, g_stats->rt_afk_ms + i, g_stats->rt_reading_ms.load()) / 36000 / 100.;
+		}
+		std::cerr << ") (" << 10000 * read_time0 / (1 + read_time0 + total_time) / 100. << "%)" << std::endl;
 		// Time spent in sampling logic, but count is the number of resulting tokens.
 		if (auto count = g_stats->raw_samples.load()) {
 			std::cerr << "Sample speed: ";
@@ -1946,6 +1949,9 @@ int main(int argc, char* argv[])
 			auto acpt = g_stats->raw_accepts.load() * 10000 / count / 100.;
 			auto disc = g_stats->raw_discards.load() * 10000 / count / 100.;
 			std::cerr << " (accept " << acpt << "%; discard " << disc << "%)" << std::endl;
+		}
+		if (auto count = g_stats->rt_reloads.load()) {
+			std::cerr << "Edits (reloads): " << count << std::endl;
 		}
 		if (total_time && tr_count) {
 			time_t end = g_stats->start_time.load() + total_time * 1000 / tr_count * g_lines.count_lines() / 1000;
