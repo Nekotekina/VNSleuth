@@ -1378,8 +1378,10 @@ int main(int argc, char* argv[])
 		update_input_time();
 		if (g_stop)
 			break;
+		if (line.empty())
+			continue;
 		if (g_mode == op_mode::rt_llama) {
-			if (line.empty() || line.starts_with("\01")) {
+			if (line.starts_with("\01")) {
 				// Process rewrite request
 				while (line.starts_with("\01")) {
 					line.erase(0, 1);
@@ -1401,7 +1403,7 @@ int main(int argc, char* argv[])
 				if (!translate(params, id_queue.back(), tr_cmd::kick))
 					return 1;
 				continue;
-			} else if (line == "\02" || line == "\b") {
+			} else if (line == "\02") {
 				// Process rewind request (^B)
 				// Remove last history entry, show previous one
 				if (g_history.size() < 2) {

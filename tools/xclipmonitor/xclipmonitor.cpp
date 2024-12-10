@@ -105,17 +105,19 @@ std::string flatten(std::string buf)
 
 void sigh(int) { g_stop = true; }
 
+::termios told{}, tprev{};
+
 int main(int argc, char* argv[])
 {
 	signal(SIGINT, sigh);
 
 	// Set terminal to raw mode
-	static struct termios told {};
 	if (tcgetattr(0, &told) < 0) {
 		perror("tcgetattr failed");
 		return 1;
 	}
 
+	tprev = told;
 	told.c_lflag &= ~ICANON;
 	told.c_lflag &= ~ECHO;
 	told.c_cc[VMIN] = 1;
@@ -125,11 +127,9 @@ int main(int argc, char* argv[])
 		return 1;
 	}
 
-	told.c_lflag |= ICANON;
-	told.c_lflag |= ECHO;
 	atexit([] {
 		// Reset terminal mode
-		tcsetattr(0, TCSADRAIN, &told);
+		tcsetattr(0, TCSADRAIN, &tprev);
 	});
 
 	Display* disp;
@@ -191,8 +191,9 @@ int main(int argc, char* argv[])
 			if (XGetEventData(disp, cookie) && cookie->type == GenericEvent) {
 				XIRawEvent* event = (XIRawEvent*)cookie->data;
 				if (cookie->evtype == XI_RawButtonPress && event->detail == 9) {
-					// Send ^A rewrite request
+					// Send ^A rewrite request or ^B rewind request
 					// Retrieve current text selection and send it
+					// Doesn't work on Wayland
 					auto rwtime = std::chrono::steady_clock::now();
 					if (rwtime - last_rewrite < 1s) {
 						continue;
@@ -200,6 +201,7 @@ int main(int argc, char* argv[])
 						putchar('\01');
 						puts(flatten(sel).c_str());
 					} else {
+						putchar('\02');
 						putchar('\n');
 					}
 					last_rewrite = rwtime;
@@ -216,20 +218,55 @@ int main(int argc, char* argv[])
 			}
 		}
 
-		// Send keypresses read from stdin as control characters
+		// Send keypresses read from stdin
+		std::string in_buf;
 		if (poll(&ifd, 1, 0) > 0) {
 			char c{};
-			if (read(STDIN_FILENO, &c, 1) == 1) {
-				// Replace "dangerous" commands
-				if (c == 'r')
-					c = 'e';
-				if (c == 'f')
-					continue;
-				if (c >= 'a' && c <= 'z') {
-					// Convert lowercase letters
-					c -= 'a';
-					c += 1;
+			while (true) {
+				if (read(STDIN_FILENO, &c, 1) != 1) {
+					perror("Reading from stdin failed");
+					return 1;
 				}
+				// Ignore empty strings
+				if (!in_buf.empty() || c != '\n')
+					in_buf += c;
+				if (poll(&ifd, 1, 20) <= 0)
+					break;
+			}
+			c = 0;
+			if (!in_buf.empty()) {
+				if (in_buf.size() == 1) {
+					c = in_buf[0];
+					// Small hacks (should be better to remove at some point)
+					if (c == 'e' || c == ' ')
+						c = '\05';
+					if (c == 'b')
+						c = '\02';
+					if (c == 'n')
+						c = '\x0e';
+					if (c == 'q')
+						c = '\03';
+					if (c == 's')
+						c = '\x13';
+				} else {
+					// Strip remaining strings in multiline input
+					if (auto pos = in_buf.find_first_of('\n') + 1)
+						in_buf.resize(pos - 1);
+					if (std::any_of(in_buf.begin(), in_buf.end(), [](unsigned char c) { return c < 32; }))
+						continue;
+					// Sent non-empty rewrite request (assuming inserted by middle-click)
+					putchar('\01');
+					puts(in_buf.c_str());
+					putchar('\n');
+					fflush(stdout);
+					in_buf.clear();
+					continue;
+				}
+
+				// Replace "dangerous" reload command
+				if (c == '\x12')
+					c = '\05';
+
 				if (c == '\05' && argc > 1) {
 					// Send ^S save request (unreliable)
 					putchar('\x13');
@@ -246,11 +283,14 @@ int main(int argc, char* argv[])
 					}
 					waitpid(pid, nullptr, 0);
 					c = '\x12'; // ^R - reload request
+				} else if (c == '\05') {
+					c = '\x12';
 				}
 				if (c > 0 && c < 32) {
-					if (c == '\01') {
-						// Send ^A rewrite request
+					if (c == '\t') {
+						// Send ^A rewrite request with possible payload
 						// Retrieve current text selection and send it
+						// Doesn't work on Wayland
 						auto rwtime = std::chrono::steady_clock::now();
 						if (rwtime - last_rewrite < 1s) {
 							c = '\n';
@@ -272,12 +312,8 @@ int main(int argc, char* argv[])
 				}
 				if (c == '\03') {
 					// Stop on Ctrl+C
-					usleep(300'000);
 					break;
 				}
-			} else {
-				perror("Reading from stdin failed");
-				return 1;
 			}
 
 			// Retry poll for non-blocking read
@@ -295,6 +331,11 @@ int main(int argc, char* argv[])
 		}
 	}
 
+	// Stop on Ctrl+C
+	putchar('\03');
+	putchar('\n');
+	fflush(stdout);
 	XCloseDisplay(disp);
+	usleep(300'000);
 	return 0;
 }
