@@ -1401,7 +1401,7 @@ int main(int argc, char* argv[])
 				if (!translate(params, id_queue.back(), tr_cmd::kick))
 					return 1;
 				continue;
-			} else if (line == "\02" || line == "\b") {
+			} else if (line == "\02") {
 				// Process rewind request (^B)
 				// Remove last history entry, show previous one
 				if (g_history.size() < 2) {
