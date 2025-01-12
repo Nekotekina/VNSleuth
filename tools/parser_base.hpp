@@ -97,6 +97,9 @@ struct parser_base {
 
 	explicit parser_base(std::string_view data) : data(data) {}
 
+	parser_base(const parser_base&) = delete;
+	parser_base& operator=(const parser_base&) = delete;
+
 	struct memcpy_reader {
 		void operator()(std::size_t /* offset */, char* dst, const char* src, std::size_t count) const
 		{
@@ -229,6 +232,8 @@ struct owning_parser : private std::string, public parser_base {
 	std::string move() { return std::move(*static_cast<std::string*>(this)); }
 };
 
+static_assert(!std::is_copy_assignable_v<owning_parser> && !std::is_copy_constructible_v<owning_parser>);
+
 // clang-format off
 
 // Base class for format-specific parsers
@@ -328,8 +333,8 @@ parser_func_t make_lazy_format_parser(std::string_view data)
 
 inline parser_func_t make_noop_parser(std::string_view data)
 {
-	return [parser = parser_base(data)](bool, parser_base*) -> const parser_base& {
-		return parser;
+	return [parser = std::make_shared<parser_base>(data)](bool, parser_base*) -> const parser_base& {
+		return *parser;
 	};
 }
 // clang-format on
