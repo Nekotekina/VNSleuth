@@ -266,7 +266,7 @@ std::vector<std::pair<uint, float>> get_recollections(common_params& params, lin
 		// Cut elements with low similarity
 		auto& [pos, sim] = rel;
 		tokens += g_lines[g_history[pos]].tokens;
-		if (tokens > params.n_ctx / 8u - 1) {
+		if (tokens > std::min(1024u, params.n_ctx / 8u) - 1) {
 			break;
 		}
 		result.emplace_back(pos, sim);
@@ -514,7 +514,7 @@ bool translate(common_params& params, line_id id, tr_cmd cmd)
 			prompt_size = tokens.size();
 			if (ectx) {
 				// Make space for recollections (currently constant)
-				prompt_size += params.n_ctx / 8u;
+				prompt_size += std::min(1024u, params.n_ctx / 8u);
 				tokens.resize(prompt_size, llama_token_nl(model));
 			}
 			std::cerr << "Permanent tokens: " << prompt_size << std::endl;
@@ -685,7 +685,7 @@ bool translate(common_params& params, line_id id, tr_cmd cmd)
 			llama_kv_cache_seq_cp(ctx, 0, 1, params.n_keep, prompt_size);
 			if (id != c_bad_id) {
 				// Limit recollections cache
-				while (recollections.size() >= params.speculative.n_min * 2) {
+				while (recollections.size() >= params.speculative.n_min * 2u) {
 					if (recollections.begin()->first > id)
 						recollections.erase(std::prev(recollections.end()));
 					else
