@@ -425,7 +425,10 @@ std::pair<uint, uint> load_translation(uint seg, const fs::path& path, bool veri
 			expected += g_lines[id].name;
 			expected += g_lines[id].text;
 			if (temp != expected) {
-				is_broken = true;
+				if (!std::exchange(is_broken, true)) {
+					std::cerr << " Expected: " << expected << std::endl;
+					std::cerr << " Got:      " << temp << std::endl;
+				}
 				if (g_mode == op_mode::print_info) {
 					// Repair
 					text.resize(text.size() - temp.size() - 1);
@@ -873,15 +876,34 @@ int main(int argc, char* argv[])
 					U"【】", //
 					U"《》", //
 					U"〝〟", //
+					U"‘’", //
+					U"“”", //
 					U"()",	 //
 					U"[]",
 					U"（）", //
 				};
 				// Furigana, possibly ((thoughts))
 				static constexpr auto excl_braces = U"《(（"sv;
+				// Incomplete list of characters that roughly means the end of a sentence.
+				static constexpr auto closers = U"。.！!？?…‥∴∵」』】》〟)]）｝-—･－\'\"＇＂’”～♪"sv;
+				// Incomplete list of sentence separators.
+				static constexpr auto commas = U"、,;"sv;
+				// Incomplete list of "special" shape-like characters. TODO.
+				static constexpr auto shapes = U"♡♥❤❥☆★○●◎◇◆□■△▲▽▼※†‡◯〇"sv;
 				static auto is_open = [](std::u32string_view str) -> int {
 					std::u32string stack;
 					for (auto& c : str) {
+						// Add some special treatment for braces that can (possibly) be symmetrical (TODO)
+						if (U"’”＇＂\'\""sv.find_first_of(c) + 1) {
+							if (stack.ends_with(c)) {
+								if (stack.empty())
+									return -1;
+								stack.pop_back();
+							} else {
+								stack.push_back(c);
+							}
+							continue;
+						}
 						for (auto& [open, close, _] : braces) {
 							if (c == open) {
 								stack.push_back(close);
@@ -930,10 +952,13 @@ int main(int argc, char* argv[])
 					// Also don't squash with lines not starting with text (TODO: fix jp-specific check)
 					if (start_speech(lines.back()) && end_speech(lines.back()) && is_jp(line[0])) {
 						if (is_open(line) == 0 && !start_speech(line, true)) {
-							lines.back() += line;
-							// Add sentinel to prevent further squashing
-							new_line(U"");
-							continue;
+							// Only squash if sentence is "unambiguously" finished or has a comma-like ending
+							if (closers.find_first_of(line.back()) + 1 || commas.find_first_of(line.back()) + 1) {
+								lines.back() += line;
+								// Add sentinel to prevent further squashing
+								new_line(U"");
+								continue;
+							}
 						}
 					}
 				} else if (prev_op > 0) {
@@ -941,7 +966,9 @@ int main(int argc, char* argv[])
 					lines.back() += U"　";
 					lines.back() += line;
 					continue;
-				} else if (lines.back().ends_with(U'、') || lines.back().ends_with(',')) {
+				} else if (lines.back().empty()) {
+					// Do nothing
+				} else if (auto c = lines.back().back(); closers.find_first_of(c) == size_t(-1) && shapes.find_first_of(c) == size_t(-1)) {
 					// Append speech after incomplete sentence
 					if (prev_op == 0 && start_speech(line)) {
 						lines.back() += line;
