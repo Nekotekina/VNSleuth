@@ -628,6 +628,7 @@ int main(int argc, char* argv[])
 			if (p.is_open()) {
 				p << "This is an accurate translation of a Japanese novel to English." << std::endl;
 				p << "Line starting with En: only contains the translation of the preceding JP: line." << std::endl;
+				p << "Preview: section shows future lines for reference for the translator." << std::endl;
 				p << "All honorifics are always preserved as -san, -chan, -sama, etc." << std::endl;
 				p << "<START>" << std::endl;
 				p.close();

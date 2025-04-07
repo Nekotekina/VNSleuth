@@ -977,6 +977,47 @@ bool translate(common_params& params, line_id id, tr_cmd cmd)
 			continue;
 
 		auto lag0 = std::chrono::steady_clock::now();
+
+		// Inject lookahead text before pre-annotations, as a raw text
+		// It's a temporary chunk to be ejected immediately
+		uint lookahead = 0;
+		if (!g_lines.is_last(pid)) {
+			// Arbitrary limit
+			static const uint c_lookahead = std::min<uint>(params.n_predict, llama_n_ctx(ctx) / 16u);
+
+			chunks.emplace_back();
+			auto pid2 = pid;
+			//g_lines.advance(pid2);
+			while (pid2 != c_bad_id && (chunks.back() < c_lookahead || pid2.second - pid.second <= 5)) {
+				std::vector<llama_token> ts;
+				if (chunks.back() == 0)
+					ts += llama_tokenize(model, "Preview:\n", false);
+				ts += llama_tokenize(model, g_lines[pid2].name, false);
+				ts += llama_tokenize(model, g_lines[pid2].text, false);
+				//std::cerr << g_esc.buf << g_lines[pid2].text << g_esc.reset << std::endl;
+				ts += llama_tokenize(model, "\n<BREAK>\n", false);
+				// Soft limit: both line count and token count (probably 256) should exceed it
+				if (chunks.back() + ts.size() > c_lookahead && pid2.second - pid.second > 5)
+					break;
+				// Hard limit for sanity
+				if (chunks.back() + ts.size() > llama_n_ctx(ctx) / 16 * 3)
+					break;
+				tokens += ts;
+				chunks.back() += ts.size();
+				lookahead += ts.size();
+				g_lines.advance(pid2);
+			}
+			// No need for empty or singular preview
+			if (pid2.second - pid.second <= 1) {
+				tokens.resize(tokens.size() - chunks.back());
+				chunks.back() = 0;
+			}
+			if (chunks.back() == 0) {
+				lookahead = 0;
+				chunks.pop_back();
+			}
+		}
+
 		std::string llama_out;
 		llama_out += line.pre_ann;
 		if (pid < id || line.tr_tts.empty())
@@ -1253,6 +1294,18 @@ bool translate(common_params& params, line_id id, tr_cmd cmd)
 					}
 				}
 			}
+		}
+
+		if (lookahead) {
+			// Cleanup lookahead chunk
+			auto p0 = decoded - lookahead - chunks.back();
+			auto p1 = decoded - chunks.back();
+			tokens.erase(tokens.begin() + p0, tokens.begin() + p1);
+			if (!llama_kv_cache_seq_rm(ctx, 0, p0, p1))
+				throw std::runtime_error("llama_kv_cache_seq_rm lookahead");
+			llama_kv_cache_seq_add(ctx, 0, p1, -1, 0u - lookahead);
+			decoded -= lookahead;
+			chunks.erase(chunks.begin() + (chunks.size() - 2));
 		}
 
 		common_sampler_free(sctx);
