@@ -83,7 +83,7 @@ double cosine_similarity(const std::vector<float>& id1, double sum1, const std::
 	return sum / (sqrt(sum1) * sqrt(sum2));
 }
 
-decltype(g_replaces) make_name_replaces(std::string_view text)
+decltype(g_replaces) get_replaces(std::string_view text)
 {
 	static constexpr std::pair<std::array<const char*, 4>, std::array<const char*, 4>> s_suffix_map[]{
 		// clang-format off
@@ -98,6 +98,22 @@ decltype(g_replaces) make_name_replaces(std::string_view text)
 	};
 
 	decltype(g_replaces) result;
+
+	// Minor formatting unification (TODO)
+	result.emplace_back("…", "...");
+	result.emplace_back("‘", "\'");
+	result.emplace_back("’", "\'");
+	result.emplace_back("“", "\"");
+	result.emplace_back("”", "\"");
+	result.emplace_back("　", " ");
+	result.emplace_back("、", ",");
+	result.emplace_back("．", ".");
+	result.emplace_back("？", "?");
+	result.emplace_back("！", "!");
+	result.emplace_back("??", "???");
+	result.emplace_back("!!", "!!!");
+	result.emplace_back("? !", "?!");
+	result.emplace_back("! ?", "?!");
 
 	for (const auto& [orig_name, pair] : g_dict) {
 		// Filter non-names (TODO: this should be much more complicated)
@@ -266,7 +282,7 @@ std::vector<std::pair<uint, float>> get_recollections(common_params& params, lin
 		// Cut elements with low similarity
 		auto& [pos, sim] = rel;
 		tokens += g_lines[g_history[pos]].tokens;
-		if (tokens > std::min(1024u, params.n_ctx / 8u) - 1) {
+		if (tokens > std::min(512u, params.n_ctx / 8u) - 1) {
 			break;
 		}
 		result.emplace_back(pos, sim);
@@ -514,7 +530,7 @@ bool translate(common_params& params, line_id id, tr_cmd cmd)
 			prompt_size = tokens.size();
 			if (ectx) {
 				// Make space for recollections (currently constant)
-				prompt_size += std::min(1024u, params.n_ctx / 8u);
+				prompt_size += std::min(512u, params.n_ctx / 8u);
 				tokens.resize(prompt_size, llama_token_nl(model));
 			}
 			std::cerr << "Permanent tokens: " << prompt_size << std::endl;
@@ -540,7 +556,7 @@ bool translate(common_params& params, line_id id, tr_cmd cmd)
 	// Eject old translations if necessary
 	static auto eject_start = [&params](bool defrag = false) -> bool {
 		uint count = 0;
-		while (tokens.size() - count + params.n_predict * 2 > params.n_ctx - 1u) {
+		while (tokens.size() - count + params.n_predict * 3 > params.n_ctx - 1u) {
 			if (chunks.empty()) {
 				std::cerr << "Prompt too big or context is too small" << std::endl;
 				return false;
@@ -1097,7 +1113,7 @@ bool translate(common_params& params, line_id id, tr_cmd cmd)
 		for (int i = 0; i < pred_count; i++)
 			common_sampler_accept(sctx, *(tokens.rbegin() + pred_count - i), use_grammar);
 		static const auto real_isuffix = "\n" + isuffix;
-		const auto replaces = make_name_replaces(line.text);
+		const auto replaces = get_replaces(line.text);
 		std::size_t last_suf = llama_out.size();
 		while (!is_stopped(pid) && !llama_out.ends_with("\n")) {
 			// Predict next token
@@ -1207,7 +1223,7 @@ bool translate(common_params& params, line_id id, tr_cmd cmd)
 							to_penalize = -2;
 							break;
 						}
-					} else if (auto nf = fixed.find(from, last_suf); nf + 1) {
+					} else if (auto nf = fixed.find(from, last_suf); nf + 1 && fixed.compare(nf, from.size(), to) != 0) {
 						// Completely cut the continuation
 						last_suf = nf + to.size();
 						fixed.resize(nf);

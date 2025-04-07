@@ -134,6 +134,16 @@ void add_line(int choice, std::string name, std::string text)
 		while (name.starts_with(" "))
 			name.erase(0, 1);
 		REPLACE(name, " ", "　"); // Change all spaces to full-width
+		REPLACE(name, "0", "０");
+		REPLACE(name, "1", "１");
+		REPLACE(name, "2", "２");
+		REPLACE(name, "3", "３");
+		REPLACE(name, "4", "４");
+		REPLACE(name, "5", "５");
+		REPLACE(name, "6", "６");
+		REPLACE(name, "7", "７");
+		REPLACE(name, "8", "８");
+		REPLACE(name, "9", "９");
 		if (name.empty()) {
 			// Use placeholder for empty names
 			name = "？？？";

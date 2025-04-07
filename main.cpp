@@ -170,16 +170,16 @@ std::u16string squeeze_line(const std::string& line)
 	return r;
 }
 
-std::u32string to_utf32(const std::string& line)
+std::u32string to_utf32(std::string_view line)
 {
 	std::wstring_convert<std::codecvt_utf8<char32_t>, char32_t> converter;
-	return converter.from_bytes(line);
+	return converter.from_bytes(line.begin(), line.end());
 }
 
-std::string to_utf8(const std::u32string& line)
+std::string to_utf8(std::u32string_view line)
 {
 	std::wstring_convert<std::codecvt_utf8<char32_t>, char32_t> converter;
-	return converter.to_bytes(line);
+	return converter.to_bytes(line.begin(), line.end());
 }
 
 // Return the "cost" of changing strings s to t
@@ -223,7 +223,7 @@ std::vector<std::u16string_view> levenshtein_distance(uint skip, std::span<const
 		std::memset(v0_flat + i * pitch, i, pitch);
 	}
 	std::size_t max_str = span.empty() ? 0 : span[0].size();
-	std::size_t min_str = 1;
+	[[maybe_unused]] std::size_t min_str = 1;
 	uint k0 = 0;
 	uint k1 = span.size();
 	for (uint i = 0; i < max_str; i++) {
@@ -426,8 +426,8 @@ std::pair<uint, uint> load_translation(uint seg, const fs::path& path, bool veri
 			expected += g_lines[id].text;
 			if (temp != expected) {
 				if (!std::exchange(is_broken, true)) {
-					std::cerr << " Expected: " << expected << std::endl;
-					std::cerr << " Got:      " << temp << std::endl;
+					std::cerr << g_esc.tran << " Expected: " << expected << std::endl;
+					std::cerr << g_esc.tran << " Got:      " << temp << g_esc.reset << std::endl;
 				}
 				if (g_mode == op_mode::print_info) {
 					// Repair
@@ -473,8 +473,10 @@ std::pair<uint, uint> load_translation(uint seg, const fs::path& path, bool veri
 	}
 
 	// Check and load what remains in the file
-	auto old = std::move(g_lines.segs[seg].tr_tail);
-	g_lines.segs[seg].tr_tail = std::move(text);
+	if (verify) {
+		auto old = std::move(g_lines.segs[seg].tr_tail);
+		g_lines.segs[seg].tr_tail = std::move(text);
+	}
 	if (keep)
 		kept = -1;
 
@@ -784,15 +786,18 @@ int main(int argc, char* argv[])
 		seg.cache_name = "__vnsleuth_text.txt";
 		std::vector<std::u32string> lines{1};
 		std::u32string all_lines = to_utf32(data);
+		std::unordered_map<std::u32string, int> encountered;
 		const bool no_squash = std::getenv("VNSLEUTH_NO_SQUASH");
 		for (std::size_t p = 0; p < all_lines.size();) {
 			const std::size_t end = all_lines.find_first_of(U"\n✏", p);
 			std::u32string line = all_lines.substr(p, end - p);
 			p = end + 1;
+			REPLACE(line, U"･", U"・");
 			REPLACE(line, U"・・・", U"・・"); // Preprocess dot sequence (accent)
 			REPLACE(line, U"（・・）", U"");   // Remove accent furigana
 			REPLACE(line, U"《・・》", U"");
 			REPLACE(line, U"(・・)", U"");
+			REPLACE(line, U"・・", U"…");
 			REPLACE(line, U"（）", U""); // Remove empty furigana from certain formats
 			REPLACE(line, U"《》", U"");
 			REPLACE(line, U"()", U"");
@@ -848,10 +853,53 @@ int main(int argc, char* argv[])
 					line[i] -= U'ａ' - 'a';
 				i++;
 			}
+			// Remove some noisy readings which may cause problems
+			auto denoise = [&](std::u32string_view word, std::u32string_view read) {
+				size_t iw = 0;
+				size_t ir = 0;
+				size_t start = 0;
+				size_t open = 0;
+				for (size_t i = 0; i < line.size(); i++) {
+					if (line[i] == ' ' || line[i] == U'　') {
+						continue;
+					}
+					if (iw && U"《(（"sv.find_first_of(line[i]) + 1) {
+						open++;
+						continue;
+					}
+					if (iw && U"》）)"sv.find_first_of(line[i]) + 1) {
+						open--;
+						if (iw == word.size() && ir == read.size()) {
+							line.replace(start, i - start + 1, word);
+							iw = 0;
+							ir = 0;
+							i = start + word.size() - 1;
+						}
+						continue;
+					}
+					if (iw < word.size() && line[i] == word[iw]) {
+						if (!iw && !ir) {
+							start = i;
+						}
+						iw++;
+						continue;
+					}
+					if (open && iw && ir < read.size() && line[i] == read[ir]) {
+						ir++;
+						continue;
+					}
+					iw = 0;
+					ir = 0;
+				}
+			};
+			// (TODO: might be better to attach a dictionary)
+			if (!line.empty()) {
+				denoise(U"怪我", U"けが");
+			}
 			// Function to split too long strings
 			auto new_line = [&](std::u32string str) {
 				// When includes split indicator, real max_size is (max_size + 1)
-				static constexpr std::size_t max_size = 1023;
+				static constexpr std::size_t max_size = 511;
 				while (lines.back().size() > max_size + 1) {
 					std::size_t new_size = max_size;
 					// Find convenient split position (dot or comma)
@@ -884,9 +932,9 @@ int main(int argc, char* argv[])
 					U"（）", //
 				};
 				// Furigana, possibly ((thoughts))
-				static constexpr auto excl_braces = U"《(（"sv;
+				static constexpr auto excl_braces = U"《(（【"sv;
 				// Incomplete list of characters that roughly means the end of a sentence.
-				static constexpr auto closers = U"。.！!？?…‥∴∵」』】》〟)]）｝-—･－\'\"＇＂’”～♪"sv;
+				static constexpr auto closers = U"。.！!？?…‥∴∵」』】》〟)]）｝-—－\'\"＇＂’”～♪"sv;
 				// Incomplete list of sentence separators.
 				static constexpr auto commas = U"、,;"sv;
 				// Incomplete list of "special" shape-like characters. TODO.
@@ -918,7 +966,10 @@ int main(int argc, char* argv[])
 							}
 						}
 					}
-					return !stack.empty();
+					// Return opening character corresponding to first stack element
+					if (stack.empty())
+						return 0;
+					return stack[0];
 				};
 				static auto has_speech = [](std::u32string_view str) -> bool {
 					for (auto& arr : braces) {
@@ -947,35 +998,49 @@ int main(int argc, char* argv[])
 					}
 					return false;
 				};
-				const int prev_op = is_open(lines.back());
-				if (has_speech(lines.back()) && prev_op == 0) {
+				auto& s = lines.back();
+				const int prev_op = is_open(s);
+				const int next_op = is_open(line);
+				if (has_speech(s) && prev_op == 0) {
 					// Don't squash two speeches
 					// Also don't squash with lines not starting with text (TODO: fix jp-specific check)
-					if (start_speech(lines.back()) && end_speech(lines.back()) && is_jp(line[0])) {
-						if (is_open(line) == 0 && !start_speech(line, true)) {
+					if (start_speech(s) && end_speech(s) && is_jp(line[0])) {
+						if (next_op == 0 && !start_speech(line, true) && !end_speech(line)) {
 							// Only squash if sentence is "unambiguously" finished or has a comma-like ending
 							if (closers.find_first_of(line.back()) + 1 || commas.find_first_of(line.back()) + 1) {
-								lines.back() += line;
-								// Add sentinel to prevent further squashing
-								new_line(U"");
+								if (line.find_first_of(U" 　") == size_t(-1) || encountered[line] <= 0) {
+									encountered[line] = INT_MIN;
+									s += line;
+									// Add sentinel to prevent further squashing
+									new_line(U"");
+									continue;
+								}
+							}
+						}
+					}
+				} else if (s.empty()) {
+					// Add line after a sentinel
+				} else if (prev_op > 0 || (prev_op == 0 && next_op < 0)) {
+					// Squash split speech with desperate attempt do drop unclosed speech
+					if (!start_speech(line, true)) {
+						s += U"　";
+						s += line;
+						continue;
+					}
+				} else if (closers.find_first_of(s.back()) == size_t(-1) && shapes.find_first_of(s.back()) == size_t(-1)) {
+					// Append speech after incomplete sentence (TODO: maybe it needs an option to completely disable it, it causes problems)
+					if (s.find_first_of(U" 　") == size_t(-1) && prev_op == 0 && start_speech(line) && !has_speech(s)) {
+						if (shapes.find_first_of(s.front()) == size_t(-1) && std::any_of(s.begin(), s.end(), is_jp)) {
+							// Very fragile condition
+							if (commas.find_first_of(s.back()) + 1 || encountered[s] <= 0) {
+								encountered[s] = INT_MIN;
+								s += line;
 								continue;
 							}
 						}
 					}
-				} else if (prev_op > 0) {
-					// Squash split speech
-					lines.back() += U"　";
-					lines.back() += line;
-					continue;
-				} else if (lines.back().empty()) {
-					// Do nothing
-				} else if (auto c = lines.back().back(); closers.find_first_of(c) == size_t(-1) && shapes.find_first_of(c) == size_t(-1)) {
-					// Append speech after incomplete sentence
-					if (prev_op == 0 && start_speech(line)) {
-						lines.back() += line;
-						continue;
-					}
 				}
+				encountered[s]++;
 			}
 			new_line(std::move(line));
 			if (p >= all_lines.size())
@@ -1025,7 +1090,6 @@ int main(int argc, char* argv[])
 				if (g_mode == op_mode::print_info || g_mode == op_mode::rt_cached || g_mode == op_mode::rt_llama) {
 					if (g_mode == op_mode::print_info) {
 						std::cerr << "Found data: " << new_seg.src_name << std::endl;
-						std::cerr << "Translation: " << new_seg.cache_name;
 					}
 					auto cache_path = vnsleuth_path / new_seg.cache_name;
 					if (fs::is_regular_file(cache_path)) {
@@ -1034,18 +1098,18 @@ int main(int argc, char* argv[])
 							is_incomplete = true;
 							is_broken = true;
 							if (g_mode == op_mode::print_info)
-								std::cerr << " (broken)" << std::endl;
+								std::cerr << new_seg.cache_name << " (broken)" << std::endl;
 						} else if (new_seg.tr_tail.empty() || tr_lines < new_seg.lines.size()) {
 							is_incomplete = true;
 							if (g_mode == op_mode::print_info)
-								std::cerr << " (partial)" << std::endl;
+								std::cerr << new_seg.cache_name << " (partial)" << std::endl;
 						} else {
 							if (g_mode == op_mode::print_info)
-								std::cerr << " (full)" << std::endl;
+								std::cerr << new_seg.cache_name << " (full)" << std::endl;
 						}
 					} else {
 						if (g_mode == op_mode::print_info)
-							std::cerr << " (not found)" << std::endl;
+							std::cerr << new_seg.cache_name << " (not found)" << std::endl;
 						is_incomplete = true;
 					}
 				}
@@ -1573,7 +1637,7 @@ int main(int argc, char* argv[])
 				}
 
 				if (!id_queue.empty() && id_queue.back() != g_history.back()) {
-					std::cerr << "Translation rewound.";
+					std::cerr << "Translation rewound." << std::endl;
 					id_queue.clear();
 				}
 				if (prev_id != c_bad_id) {
