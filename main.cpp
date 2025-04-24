@@ -1478,6 +1478,10 @@ int main(int argc, char* argv[])
 				while (line.starts_with("\01")) {
 					line.erase(0, 1);
 				}
+				if (line.empty()) {
+					// Disable empty line rewrite
+					continue;
+				}
 				if (id_queue.empty() || id_queue.back() != g_history.back()) {
 					std::cerr << "Cannot process rewrite request here. Try rewinding (^B)." << std::endl;
 					continue;

@@ -1116,9 +1116,17 @@ bool translate(common_params& params, line_id id, tr_cmd cmd)
 		const auto replaces = get_replaces(line.text);
 		std::size_t last_suf = llama_out.size();
 		while (!is_stopped(pid) && !llama_out.ends_with("\n")) {
+			static const auto s_tnl = llama_tokenize(model, "\n", false)[0];
+			static const auto s_tlf = llama_token_nl(model);
+
 			// Predict next token
 			auto stamp0 = std::chrono::steady_clock::now();
 			auto logits = llama_get_logits(ctx);
+			if ((!line.name.empty() && llama_out == spker) || pred_count == 0) {
+				// Don't allow newlines appear immediately (workaround)
+				logits[s_tnl] = -INFINITY;
+				logits[s_tlf] = -INFINITY;
+			}
 			for (auto& vec : line.tr_tts) {
 				if (pred_count + 0u >= vec.size())
 					continue;
@@ -1165,14 +1173,13 @@ bool translate(common_params& params, line_id id, tr_cmd cmd)
 			g_stats->raw_samples++;
 			auto stamp1 = std::chrono::steady_clock::now();
 			g_stats->sample_time += (stamp1 - stamp0).count() / 1000;
-			static const auto s_tnl = llama_tokenize(model, "\n", false);
 			if (++pred_count > params.n_predict)
-				token_id = s_tnl[0]; // Force newline if size exceeded
+				token_id = s_tnl; // Force newline if size exceeded
 			if (llama_token_is_eog(model, token_id))
-				token_id = s_tnl[0]; // Force newline on EOT/EOS
+				token_id = s_tnl; // Force newline on EOT/EOS
 			auto token_str = llama_token_to_piece(model, token_id);
 			if (token_str == "\n")
-				token_id = s_tnl[0]; // Fix alternative newline (TODO: correct workaround)
+				token_id = s_tnl; // Fix alternative newline (TODO: correct workaround)
 			if (std::count(token_str.begin(), token_str.end(), '\n') > 0u + token_str.ends_with("\n")) {
 				// Attempt to fix the line containing incorrect newlines
 				token_str.resize(token_str.find_first_of('\n') + 1);
@@ -1181,7 +1188,7 @@ bool translate(common_params& params, line_id id, tr_cmd cmd)
 					token_id = tks[0];
 				else {
 					std::cerr << "Token sequence was forsibly converted to newline: " << token_str;
-					token_id = s_tnl[0];
+					token_id = s_tnl;
 				}
 			}
 			tokens.push_back(token_id);
