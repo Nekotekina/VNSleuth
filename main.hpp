@@ -107,7 +107,7 @@ inline enum class op_mode {
 using line_id = std::pair<uint, uint>;
 
 struct line_info {
-	std::string name;		  // Character name (speaker), may be empty
+	std::string name_;		  // Character name (speaker), may be empty or number linking to another name
 	std::string text;		  // Original text
 	std::u16string_view sq_text; // Processed text (squeezed, owned permanently by g_strings)
 	std::string tr_text;		 // Translated text (includes original line and annotations)
@@ -120,6 +120,8 @@ struct line_info {
 	double embd_sqrsum;
 
 	line_id get_id() const;
+
+	std::string name() const;
 };
 
 struct segment_info {
@@ -281,6 +283,17 @@ inline std::set<std::pair<std::string, std::string>> g_furigana;
 
 // Dictionary (name -> translation; annotation)
 inline std::map<std::string, std::pair<std::string, std::string>, std::less<>> g_dict{{"？？？:", {"???:", ""}}};
+
+inline std::string line_info::name() const
+{
+	if (this->name_.find_first_not_of("0123456789:") == size_t(-1)) {
+		auto found = g_dict.find(this->name_);
+		if (found != g_dict.end() && !found->second.first.empty()) {
+			return found->second.first;
+		}
+	}
+	return this->name_;
+}
 
 // Default replace rules to reduce token count and also fix potential issues with borked translations
 inline const std::vector<std::pair<std::string, std::string>> g_default_replaces{

@@ -74,36 +74,39 @@ std::string print_line(line_id id, std::string* line = nullptr, bool stream = fa
 {
 	std::string out = apply_replaces(g_lines[id].text, false, 0);
 	std::string speaker;
-	if (g_lines[id].name.starts_with("選択肢#")) {
+	if (g_lines[id].name_.starts_with("選択肢#")) {
 		// Insert translated choice selection prefix
 		speaker += " Choice ";
-		speaker += g_lines[id].name.substr("選択肢#"sv.size());
-	} else if (!g_lines[id].name.empty()) {
+		speaker += g_lines[id].name_.substr("選択肢#"sv.size());
+	} else if (!g_lines[id].name_.empty()) {
 		// Find registered speaker translation
 		std::lock_guard lock(g_mutex);
 
-		const auto& found = g_dict.at(g_lines[id].name);
+		const auto& found = g_dict.at(g_lines[id].name());
 		if (!found.first.empty()) {
 			speaker += " ";
 			speaker += found.first;
+		} else if (g_lines[id].name_.find_first_not_of("0123456789:") == size_t(-1)) {
+			speaker += " ";
+			speaker += g_lines[id].name_;
 		}
 	}
 
 	if (g_mode == op_mode::print_only) {
 		// Passthrough mode (print-only): add \ for multiline input
-		std::cout << iprefix << g_lines[id].name << out << "\\" << std::endl;
+		std::cout << iprefix << g_lines[id].name() << out << "\\" << std::endl;
 		// Add Ctrl+D for same-line output
 		std::cout << isuffix << speaker << "\04" << std::flush;
 	}
 
 	if (stream) {
 		// Print colored output without prefixes
-		std::cout << g_esc.orig << *line << g_lines[id].name << out << g_esc.reset << std::endl;
+		std::cout << g_esc.orig << *line << g_lines[id].name() << out << g_esc.reset << std::endl;
 	}
 
 	if (line) {
 		line->append(iprefix);
-		line->append(g_lines[id].name);
+		line->append(g_lines[id].name());
 		line->append(out);
 		line->append("\n");
 	}
@@ -223,7 +226,6 @@ std::vector<std::u16string_view> levenshtein_distance(uint skip, std::span<const
 		std::memset(v0_flat + i * pitch, i, pitch);
 	}
 	std::size_t max_str = span.empty() ? 0 : span[0].size();
-	[[maybe_unused]] std::size_t min_str = 1;
 	uint k0 = 0;
 	uint k1 = span.size();
 	for (uint i = 0; i < max_str; i++) {
@@ -422,7 +424,7 @@ std::pair<uint, uint> load_translation(uint seg, const fs::path& path, bool veri
 		text += '\n';
 		if (id != c_bad_id && temp.starts_with(iprefix)) {
 			std::string expected = iprefix;
-			expected += g_lines[id].name;
+			expected += g_lines[id].name();
 			expected += g_lines[id].text;
 			if (temp != expected) {
 				if (!std::exchange(is_broken, true)) {
@@ -536,6 +538,7 @@ int main(int argc, char* argv[])
 	params.warmup = false;
 	params.model = ".";
 	params.speculative.model = "";
+	params.speculative.n_min = 10;
 
 	// Basic param check
 	std::string dir_name = argv[1];
@@ -659,7 +662,15 @@ int main(int argc, char* argv[])
 						g_dict[std::move(line)];
 						continue;
 					}
-					g_dict.emplace(line.substr(0, pos0), std::make_pair(line.substr(pos0, pos1 + 1 - pos0), line.substr(pos1 + 1)));
+					auto id = line.substr(0, pos0);
+					auto tr = line.substr(pos0, pos1 + 1 - pos0);
+					auto an = line.substr(pos1 + 1);
+					if (id.find_first_not_of("0123456789:") == size_t(-1)) {
+						g_dict[tr];
+						if (!an.empty())
+							std::cerr << "Name annotation ignored: " << line << std::endl;
+					}
+					g_dict[std::move(id)] = std::make_pair(std::move(tr), std::move(an));
 				} else {
 					std::cerr << "Incorrect name formatting: " << line << std::endl;
 				}
@@ -1048,8 +1059,8 @@ int main(int argc, char* argv[])
 		}
 		for (auto& line : lines) {
 			if (!line.empty()) {
-				extern void add_line(int choice, std::string name, std::string text);
-				add_line(0, "", to_utf8(line));
+				extern void add_line(int choice, std::string name, std::string text, uint);
+				add_line(0, "", to_utf8(line), -1);
 			}
 		}
 		const auto cache_path = vnsleuth_path / seg.cache_name;
@@ -1156,7 +1167,7 @@ int main(int argc, char* argv[])
 			// Dump text
 			std::ofstream dump(vnsleuth_path / "__vnsleuth_dump.txt", std::ios::trunc);
 			for (auto& line : g_lines) {
-				dump << line.name << line.text << std::endl;
+				dump << line.name() << line.text << std::endl;
 			}
 		}
 
@@ -1188,17 +1199,19 @@ int main(int argc, char* argv[])
 			bool add_dict = false;
 			for (auto& [orig, pair] : g_dict) {
 				auto& [tran, ann] = pair;
+				if (orig.find_first_not_of("0123456789:") == size_t(-1))
+					continue;
 				if (tran.empty())
 					continue;
-				if (!ann.empty() || (orig != "？？？" && file_list.empty())) {
+				if (!ann.empty()) {
 					if (!std::exchange(add_dict, true)) {
 						params.prompt += "Dictionary:\n";
 					}
 					params.prompt += orig - ":";
-					params.prompt += '\t';
+					params.prompt += "\t ";
 					params.prompt += tran - ":";
 					if (!ann.empty()) {
-						params.prompt += '\t';
+						params.prompt += "\t ";
 						params.prompt += ann;
 					}
 					params.prompt += '\n';
@@ -1425,7 +1438,7 @@ int main(int argc, char* argv[])
 		if (it != g_history.rend()) {
 			last_line = g_lines[*it].sq_text;
 			id_queue = {*it};
-			while (g_lines[id_queue[0]].name.starts_with("選択肢#")) {
+			while (g_lines[id_queue[0]].name_.starts_with("選択肢#")) {
 				it++;
 				if (it != g_history.rend()) {
 					id_queue.insert(id_queue.begin(), *it);
@@ -1739,7 +1752,7 @@ int main(int argc, char* argv[])
 				});
 				for (uint j = 0; j < result.size(); j++) {
 					for (uint i = 0; i < std::min<std::size_t>(255, result[j].size()); i++) {
-						s_char_columns[i].resize(result.size());
+						s_char_columns[i].resize(result.size() + 31);
 						s_char_columns[i][j] = result[j][i];
 					}
 				}
@@ -1977,7 +1990,7 @@ int main(int argc, char* argv[])
 			}
 
 			// List choices that are supposed to appear on the screen
-			if (next_id > last_id && g_lines[next_id].name.starts_with("選択肢#")) {
+			if (next_id > last_id && g_lines[next_id].name_.starts_with("選択肢#")) {
 				g_lines.advance(last_id);
 				continue;
 			}

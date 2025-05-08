@@ -113,7 +113,9 @@ decltype(g_replaces) get_replaces(std::string_view text)
 	result.emplace_back("??", "???");
 	result.emplace_back("!!", "!!!");
 	result.emplace_back("? !", "?!");
-	result.emplace_back("! ?", "?!");
+	result.emplace_back("! ?", "!?");
+	//result.emplace_back(". \"", ".\"");
+	//result.emplace_back("  ", " "); // Shouldn't be necessary
 
 	for (const auto& [orig_name, pair] : g_dict) {
 		// Filter non-names (TODO: this should be much more complicated)
@@ -273,7 +275,7 @@ std::vector<std::pair<uint, float>> get_recollections(common_params& params, lin
 		// There is also a strange issue when equal strings get slightly different embeddings.
 		auto& linea = g_lines[g_history[a.pos]];
 		auto& lineb = g_lines[g_history[b.pos]];
-		return &linea == &lineb || (linea.name == lineb.name && linea.text == lineb.text);
+		return &linea == &lineb || (linea.name_ == lineb.name_ && linea.text == lineb.text);
 	});
 	rel_map.erase(end, rel_map.end());
 
@@ -293,7 +295,7 @@ std::vector<std::pair<uint, float>> get_recollections(common_params& params, lin
 	return result;
 }
 
-std::vector<llama_token> llama_tokenize(llama_model* model, std::string_view str, bool add_special, bool parse_special = false)
+std::vector<llama_token> raw_tokenize(llama_model* model, std::string_view str, bool add_special, bool parse_special = false)
 {
 	std::vector<llama_token> result;
 	result.resize(llama_n_ctx_train(model));
@@ -313,6 +315,139 @@ std::string llama_token_to_piece(llama_model* model, llama_token t, bool special
 	std::string result;
 	result.resize(1024);
 	result.resize(llama_token_to_piece(model, t, result.data(), result.size(), 0, special));
+	return result;
+}
+
+// Split names into kana transcription equivalents or individual UTF8 sequences
+std::vector<llama_token> name_decompose(llama_model* model, std::string_view name)
+{
+	fprintf(stderr, "Found name: %.*s =", (int)name.size(), name.data());
+
+	std::vector<llama_token> result;
+	result.reserve(name.size());
+	std::string lower_case{name};
+	for (char& c : lower_case) {
+		if (c >= 'A' && c <= 'Z')
+			c += 'a' - 'A';
+	}
+	std::string_view low = lower_case;
+	while (!name.empty()) {
+		size_t size0 = 0;
+		while (low.starts_with(' ')) {
+			size0++;
+			low.remove_prefix(1);
+		}
+		size_t size1 = 0;
+		size_t size2 = 0;
+		// This is an incomplete experimental splitter
+		if (low.starts_with("ch") ||
+			low.starts_with("sh") ||
+			low.starts_with("ph") ||
+			low.starts_with("zh") ||
+			low.starts_with("kh") ||
+			low.starts_with("ts")) {
+			size1 = 2;
+		} else if ("bcdfghjklmnpqrstvwxyz"sv.find_first_of(low[0]) + 1) {
+			size1 = 1;
+		} else if ((low[0] & 0xe0) == 0xc0) {
+			size2 = 2;
+		} else if ((low[0] & 0xf0) == 0xe0) {
+			size2 = 3;
+		} else if ((low[0] & 0xf8) == 0xf0) {
+			size2 = 4;
+		} else {
+			size2 = 1;
+		}
+		size1 = std::min(size1, low.size());
+		low.remove_prefix(size1);
+		if (!low.empty() && !size2) {
+			if ("aeiou"sv.find_first_of(low[0]) + 1) {
+				size2 = 1;
+			}
+		}
+		low.remove_prefix(size2);
+		auto substr = name.substr(0, size0 + size1 + size2);
+		fprintf(stderr, " %.*s", (int)substr.size(), substr.data());
+		result += raw_tokenize(model, substr, false, false);
+		name.remove_prefix(size0 + size1 + size2);
+	}
+	if (!name.empty()) {
+		fprintf(stderr, " %.*s", (int)name.size(), name.data());
+		result += raw_tokenize(model, name, false, false);
+	}
+
+	fprintf(stderr, "\n");
+	return result;
+}
+
+std::vector<llama_token> name_tokenize(llama_model* model, std::string_view name)
+{
+	std::vector<llama_token> result;
+	result.reserve(name.size());
+
+	std::vector<llama_token> normalized = raw_tokenize(model, " " + std::string(name), false);
+	std::string start = llama_token_to_piece(model, normalized[0], false);
+
+	// Decompose name in two parts: first one, when not prepended by space, is separated
+	// Ideally, it won't do anything different
+	if (start.size() > 1)
+		result += raw_tokenize(model, name.substr(0, start.size() - 1), false);
+	if (name.size() > start.size() - 1)
+		result += raw_tokenize(model, name.substr(start.size() - 1), false);
+	return result;
+}
+
+// Name-aware tokenizer (TODO: rename)
+std::vector<llama_token> llama_tokenize(llama_model* model, std::string_view str, bool add_special, bool parse_special = false)
+{
+	std::vector<llama_token> result;
+	result.reserve(str.size() / 2);
+
+	// Custom delimiter list (TODO)
+	static constexpr auto delims = "~`!\'\".,?/\\|@#$%^&*()[]{}:;<>_-+= \t\r\n"sv;
+
+	size_t last_pos = 0;
+	bool prev_delim = true;
+	for (size_t i = 0; i < str.size(); i++) {
+		if (delims.find_first_of(str[i]) + 1) {
+			prev_delim = true;
+		} else if (prev_delim) {
+			prev_delim = false;
+			for (auto& [orig, pair] : g_dict) {
+				if (orig.find_first_not_of("0123456789:") == size_t(-1))
+					continue;
+				auto& [_tr, info] = pair;
+				// Skip unannotated names in legacy VN mode
+				if (info.empty() && g_lines.segs.size() > 1)
+					continue;
+				// Find translated name
+				auto tr = _tr - ":";
+				if (str.size() >= tr.size() && str.compare(i, tr.size(), tr) == 0) {
+					// Check if the name ends with a delimiter or string end
+					if (tr.size() + i == str.size() || delims.find_first_of(str[tr.size() + i]) + 1) {
+						auto str1 = str.substr(last_pos, i - last_pos);
+						if (str1.ends_with(' ')) {
+							// Different treatment for space delimiter
+							result += raw_tokenize(model, str.substr(last_pos, i - last_pos + tr.size()), add_special, parse_special);
+						} else {
+							if (!str1.empty())
+								result += raw_tokenize(model, str1, add_special, parse_special);
+							result += name_tokenize(model, tr);
+						}
+						last_pos = i + tr.size();
+						i += tr.size() - 1;
+						break;
+					}
+				}
+			}
+			continue;
+		}
+	}
+
+	if (last_pos < str.size()) {
+		result += raw_tokenize(model, str.substr(last_pos), add_special, parse_special);
+	}
+
 	return result;
 }
 
@@ -366,8 +501,8 @@ bool translate(common_params& params, line_id id, tr_cmd cmd)
 		eparams.n_gpu_layers = params.speculative.n_gpu_layers;
 		eparams.lora_adapters.clear();
 		eparams.embedding = true;
-		eparams.n_ctx = 0;		// auto
-		eparams.n_ubatch = 512; //def
+		eparams.n_ctx = 1024;
+		eparams.n_ubatch = 1024;
 		eparams.n_batch = 2048; //def
 		eparams.pooling_type = LLAMA_POOLING_TYPE_NONE;
 		eparams.flash_attn = true;
@@ -568,7 +703,6 @@ bool translate(common_params& params, line_id id, tr_cmd cmd)
 		// Apply defrag
 		if (defrag) {
 			llama_kv_cache_defrag(ctx);
-			llama_kv_cache_update(ctx);
 		}
 		return true;
 	};
@@ -606,10 +740,10 @@ bool translate(common_params& params, line_id id, tr_cmd cmd)
 		auto out = apply_replaces(g_lines[id].text, false, 0);
 		// Pre-annotations: no replaces, then original line with replaces
 		g_lines[id].pre_ann = tr_text.substr(0, pref_pos);
-		out = g_lines[id].pre_ann + iprefix + g_lines[id].name + std::move(out) + "\n";
+		out = g_lines[id].pre_ann + iprefix + g_lines[id].name() + std::move(out) + "\n";
 		// Post-annotations: no replaces
 		post_pos += iprefix.size();
-		post_pos += g_lines[id].name.size();
+		post_pos += g_lines[id].name().size();
 		post_pos += g_lines[id].text.size() + 1;
 		g_lines[id].post_ann = tr_text.substr(post_pos, spos - post_pos);
 		out += g_lines[id].post_ann;
@@ -618,7 +752,7 @@ bool translate(common_params& params, line_id id, tr_cmd cmd)
 		tr_text.remove_prefix(spos);
 		tr_text.remove_prefix(isuffix.size());
 		int token_count = 0;
-		if (!g_lines[id].name.empty()) {
+		if (!g_lines[id].name_.empty()) {
 			// Tokenize name separately: find ": " delimiter
 			auto pos = tr_text.find(": ") + 1;
 			if (!pos) {
@@ -780,10 +914,10 @@ bool translate(common_params& params, line_id id, tr_cmd cmd)
 			g_lines.advance(id);
 			if (!line.embd.empty())
 				continue;
-			auto tt = llama_tokenize(emodel, "query: " + line.text, true);
-			if (tt.size() > llama_n_ctx(ectx) - 1u)
-				tt.resize(llama_n_ctx(ectx) - 1u);
-			if (tsize + tt.size() > llama_n_ctx(ectx) - 1u)
+			auto tt = raw_tokenize(emodel, "query: " + line.text, true);
+			if (tt.size() > llama_n_ctx_train(emodel) - 1u)
+				tt.resize(llama_n_ctx_train(emodel) - 1u);
+			if (tsize + tt.size() > llama_n_ubatch(ectx) - 1u)
 				break;
 			tsize += tt.size();
 			paths.emplace_back(std::move(fname));
@@ -795,7 +929,7 @@ bool translate(common_params& params, line_id id, tr_cmd cmd)
 			return;
 		llama_set_embeddings(ectx, true);
 		llama_set_causal_attn(ectx, false);
-		auto batch = llama_batch_init(llama_n_ctx(ectx), 0, 1);
+		auto batch = llama_batch_init(llama_n_ubatch(ectx), 0, 1);
 		for (uint i = 0; i < lines.size(); i++) {
 			for (uint j = 0; j < tokens[i].size(); j++) {
 				common_batch_add(batch, tokens[i][j], j, {llama_seq_id(i + 1)}, true);
@@ -879,9 +1013,9 @@ bool translate(common_params& params, line_id id, tr_cmd cmd)
 				dump << "Line: " << g_lines.segs[id.first].src_name << ":" << id.second << std::endl;
 				for (auto& [pos, sim] : recs) {
 					auto line0 = g_lines[g_history[pos]];
-					dump << "\t[" << sim << "] " << line0.name << line0.text << std::endl;
+					dump << "\t[" << sim << "] " << line0.name() << line0.text << std::endl;
 				}
-				dump << "\t[->] " << line.name << line.text << std::endl;
+				dump << "\t[->] " << line.name() << line.text << std::endl;
 				std::cerr << "\r" << g_history.size() << std::flush;
 			}
 			std::cerr << std::endl;
@@ -997,7 +1131,7 @@ bool translate(common_params& params, line_id id, tr_cmd cmd)
 		// Inject lookahead text before pre-annotations, as a raw text
 		// It's a temporary chunk to be ejected immediately
 		uint lookahead = 0;
-		if (!g_lines.is_last(pid)) {
+		if (!g_lines.is_last(pid) && (g_lines.segs.size() > 1 && g_dict.size() > 1)) {
 			// Arbitrary limit
 			static const uint c_lookahead = std::min<uint>(params.n_predict, llama_n_ctx(ctx) / 16u);
 
@@ -1008,7 +1142,7 @@ bool translate(common_params& params, line_id id, tr_cmd cmd)
 				std::vector<llama_token> ts;
 				if (chunks.back() == 0)
 					ts += llama_tokenize(model, "Preview:\n", false);
-				ts += llama_tokenize(model, g_lines[pid2].name, false);
+				ts += llama_tokenize(model, g_lines[pid2].name(), false);
 				ts += llama_tokenize(model, g_lines[pid2].text, false);
 				//std::cerr << g_esc.buf << g_lines[pid2].text << g_esc.reset << std::endl;
 				ts += llama_tokenize(model, "\n<BREAK>\n", false);
@@ -1093,7 +1227,7 @@ bool translate(common_params& params, line_id id, tr_cmd cmd)
 
 		if (params.verbosity)
 			std::fprintf(stderr, "%s[id:%u:%u, t:%zu, last:%u, chk:%llu] Line: %s%s\n", g_esc.reset, pid.first, pid.second, tokens.size(),
-						 chunks.size() ? chunks.back() : -1, std::accumulate(tokens.begin(), tokens.end(), 0ull), line.name.c_str(),
+						 chunks.size() ? chunks.back() : -1, std::accumulate(tokens.begin(), tokens.end(), 0ull), line.name().c_str(),
 						 line.text.data());
 
 		// Inject context temporarily, decode pending tokens
@@ -1109,7 +1243,7 @@ bool translate(common_params& params, line_id id, tr_cmd cmd)
 		if (!line.tr_tts.empty())
 			sparams.seed += std::accumulate(line.tr_tts.back().begin(), line.tr_tts.back().end(), line.tr_tts.size());
 		const auto sctx = common_sampler_init(model, sparams);
-		const bool use_grammar = !line.name.empty();
+		const bool use_grammar = !line.name_.empty();
 		for (int i = 0; i < pred_count; i++)
 			common_sampler_accept(sctx, *(tokens.rbegin() + pred_count - i), use_grammar);
 		static const auto real_isuffix = "\n" + isuffix;
@@ -1122,7 +1256,7 @@ bool translate(common_params& params, line_id id, tr_cmd cmd)
 			// Predict next token
 			auto stamp0 = std::chrono::steady_clock::now();
 			auto logits = llama_get_logits(ctx);
-			if ((!line.name.empty() && llama_out == spker) || pred_count == 0) {
+			if ((!line.name_.empty() && llama_out == spker) || pred_count == 0) {
 				// Don't allow newlines appear immediately (workaround)
 				logits[s_tnl] = -INFINITY;
 				logits[s_tlf] = -INFINITY;
@@ -1141,7 +1275,7 @@ bool translate(common_params& params, line_id id, tr_cmd cmd)
 					"”",  //
 					")",
 				};
-				if ((!line.name.empty() && llama_out == spker) || pred_count == 0) {
+				if ((!line.name_.empty() && llama_out == spker) || pred_count == 0) {
 					bool found = false;
 					for (auto s : s_no_penalty) {
 						if (llama_out != spker) {
@@ -1208,17 +1342,17 @@ bool translate(common_params& params, line_id id, tr_cmd cmd)
 			};
 
 			// Try to parse translated name
-			if (spker.empty() && !line.name.empty()) {
+			if (spker.empty() && !line.name().empty()) {
 				std::string_view speaker = llama_out;
 				if (auto pos = speaker.find_first_not_of(" ") + 1)
 					speaker.remove_prefix(pos - 1);
 				speaker = speaker.substr(0, speaker.find(":") + 1);
 				if (!speaker.empty()) {
 					std::lock_guard lock(g_mutex);
-					spker = g_dict[line.name].first = speaker;
+					spker = g_dict[line.name()].first = speaker;
 				}
 			}
-			if ((!spker.empty() || line.name.empty()) && is_valid_utf8(llama_out)) {
+			if ((!spker.empty() || line.name_.empty()) && is_valid_utf8(llama_out)) {
 				// TODO: implement separate replace system whith takes original text into account
 				auto fixed = llama_out;
 				// Apply name suffix replaces as well
@@ -1343,8 +1477,8 @@ bool translate(common_params& params, line_id id, tr_cmd cmd)
 			return true;
 		}
 
-		if (spker.empty() && !line.name.empty())
-			std::cerr << "Failed to parse speaker translation for: " << line.name << std::endl;
+		if (spker.empty() && !line.name_.empty())
+			std::cerr << "Failed to parse speaker translation for: " << line.name() << std::endl;
 
 		// Store translation tokens for possible reuse
 		line.tr_tts.emplace_back(tokens.end() - pred_count, tokens.end());
@@ -1354,7 +1488,7 @@ bool translate(common_params& params, line_id id, tr_cmd cmd)
 		line.tr_text.clear();
 		line.tr_text += line.pre_ann;
 		line.tr_text += iprefix;
-		line.tr_text += line.name;
+		line.tr_text += line.name();
 		line.tr_text += line.text;
 		line.tr_text += '\n';
 		line.tr_text += line.post_ann;

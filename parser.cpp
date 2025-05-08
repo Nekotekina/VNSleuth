@@ -108,7 +108,7 @@ void add_segment(const std::string& name, std::string_view data)
 	g_lines.segs_by_name[name] = g_lines.segs.size() - 1;
 }
 
-void add_line(int choice, std::string name, std::string text)
+void add_line(int choice, std::string name, std::string text, uint name_id = -1)
 {
 	if (!is_text_bytes(name))
 		err() << "Bad line (name): " << name << std::endl;
@@ -120,10 +120,9 @@ void add_line(int choice, std::string name, std::string text)
 	while (auto pos = text.find_first_of("\n") + 1)
 		text[pos - 1] = '\t';
 
-	if (!name.empty()) {
-		// Replace special ":" character with full-width variant
-		REPLACE(text, ":", "：");
+	const bool pure_numeric = !name.empty() && name.find_first_not_of("0123456789") == size_t(-1);
 
+	if (!name.empty()) {
 		REPLACE(name, "\r", "");
 		REPLACE(name, "\n", " ");
 		REPLACE(name, ":", "：");
@@ -134,16 +133,18 @@ void add_line(int choice, std::string name, std::string text)
 		while (name.starts_with(" "))
 			name.erase(0, 1);
 		REPLACE(name, " ", "　"); // Change all spaces to full-width
-		REPLACE(name, "0", "０");
-		REPLACE(name, "1", "１");
-		REPLACE(name, "2", "２");
-		REPLACE(name, "3", "３");
-		REPLACE(name, "4", "４");
-		REPLACE(name, "5", "５");
-		REPLACE(name, "6", "６");
-		REPLACE(name, "7", "７");
-		REPLACE(name, "8", "８");
-		REPLACE(name, "9", "９");
+		if (pure_numeric) {
+			REPLACE(name, "0", "０");
+			REPLACE(name, "1", "１");
+			REPLACE(name, "2", "２");
+			REPLACE(name, "3", "３");
+			REPLACE(name, "4", "４");
+			REPLACE(name, "5", "５");
+			REPLACE(name, "6", "６");
+			REPLACE(name, "7", "７");
+			REPLACE(name, "8", "８");
+			REPLACE(name, "9", "９");
+		}
 		if (name.empty()) {
 			// Use placeholder for empty names
 			name = "？？？";
@@ -155,6 +156,14 @@ void add_line(int choice, std::string name, std::string text)
 	if (choice && name.empty()) {
 		// Add choice "name" in special format
 		name = "選択肢#" + std::to_string(choice) + ":";
+	} else if (name_id + 1 && name.empty()) {
+		// Add name id instead of name
+		if (name_id < 10)
+			name += "0";
+		if (name_id < 100)
+			name += "0";
+		name += std::to_string(name_id);
+		name += ":";
 	}
 
 	line_id id{};
@@ -166,32 +175,33 @@ void add_line(int choice, std::string name, std::string text)
 		text_it->second = c_bad_id; // Mark if not unique
 
 	line_info& line = g_lines.segs[id.first].lines.emplace_back();
-	line.name = std::move(name);
+	line.name_ = std::move(name);
 	line.text = std::move(text);
 	line.sq_text = std::as_const(text_it->first);
 	line.segment = id.first;
 
-	if (!line.name.empty() && choice == 0) {
-		g_dict[line.name];
+	if (!line.name_.empty() && choice == 0)
+		g_dict[line.name_];
+	if (!line.name_.empty() && choice == 0 && name_id == uint(-1)) {
 		// Choose shortest name amongst equal translations (requires manual editing of names.txt)
 		// Useful to get rid of meaningless suffixes
 		// TODO: requires restart to take effect
 		// TODO: it repeats a lot of computation
 		// To fix it, it shouldn't modify line.name
-		auto found = g_dict.find(line.name);
+		auto found = g_dict.find(line.name_);
 		for (auto& [name, pair] : g_dict) {
-			if (found->second.first == pair.first && name.size() < found->first.size() && line.name.find(name) + 1) {
+			if (found->second.first == pair.first && name.size() < found->first.size() && line.name_.find(name) + 1) {
 				found = g_dict.find(name);
 			}
 		}
-		line.name = found->first;
+		line.name_ = found->first;
 	}
 
 	// Remember all encountered characters in a bitmap (doesn't include names)
 	for (char16_t c : text_it->first)
 		g_chars.set(c);
 
-	if (id.second == 0) {
+	if (g_lines.segs.size() > 1 && id.second == 0) {
 		auto [it, ok2] = g_start_strings.emplace(text_it->first, id);
 		if (!ok2)
 			it->second = c_bad_id;
@@ -444,7 +454,7 @@ void script_parser::read_segments(const std::string& name)
 	// Attempt parsing and return false if something goes wrong
 	auto try_parse_eth_v1 = [&]() -> bool {
 		std::size_t off = 0, off_max = this->data.size();
-		std::uint32_t op = 0, choice = 0;
+		std::uint32_t op = 0;
 		std::vector<std::string> stack;
 		err = [&] {
 			std::cerr << "Name: " << name << std::endl;
@@ -511,7 +521,6 @@ void script_parser::read_segments(const std::string& name)
 
 				// Add normal line
 				add_line(0, std::move(name), std::move(text));
-				choice = 0;
 				stack.clear();
 			}
 			if ((op == 0x14b || op == 0x14e) && stack.size() == 2) {
